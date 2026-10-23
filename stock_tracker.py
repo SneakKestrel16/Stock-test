@@ -686,6 +686,42 @@ def check_ticker(ticker, state, days=30, show_all=False):
     return {"alerts": alerts, "events": new, "note": note, "price": price}
 
 
+def watch_all(days=30, show_all=False, progress=None):
+    """Check every watchlist stock and save what was seen. Safe to run while the app
+    edits the watchlist: only the 'seen' memory of checked stocks is merged back.
+    Returns (results, report_path or None)."""
+    state = load_state()
+    results = {}
+    for i, t in enumerate(state["watchlist"], 1):
+        if progress:
+            progress(f"Checking {t} ({i}/{len(state['watchlist'])})...")
+        results[t] = check_ticker(t, state, days, show_all)
+    with STATE_LOCK:
+        fresh = load_state()
+        fresh["seen"].update({t: state["seen"][t] for t in results if t in fresh["watchlist"]})
+        save_state(fresh)
+    return results, save_report(results) if results else None
+
+
+def cmd_daily(a):
+    """Unattended run for Task Scheduler: save today's pick to the journal, check the
+    watchlist, update practice tests. Writes a line per step to daily.log."""
+    lines = [f"--- {datetime.now():%Y-%m-%d %H:%M}"]
+    for label, step in (
+            ("pick", lambda: log_picks(screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0])
+             or "saved to journal"),
+            ("watch", lambda: f"report {watch_all()[1]}"),
+            ("practice", lambda: f"{len(update_practice())} tests updated")):
+        try:
+            lines.append(f"{label}: {step()}")
+        except Exception as e:
+            lines.append(f"{label}: FAILED {e!r}")
+    HOME.mkdir(parents=True, exist_ok=True)
+    with (HOME / "daily.log").open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("\n".join(lines))
+
+
 def save_report(results):
     """results: {ticker: check_ticker() result}. Writes Markdown, returns its path."""
     report = [f"# Stock watch {date.today()}\n"]
@@ -1048,7 +1084,7 @@ def fred_last(series_id, months_back=0):
     return s.iloc[-1]
 
 
-def market_weather(signals=None):
+def market_weather(signals=None, breadth=True):
     """Signals about the market as a whole. `signals`: get_price_signals() of the stock
     list, if already downloaded (for breadth). Returns (checks, summary_line)."""
     out = []
@@ -1086,14 +1122,14 @@ def market_weather(signals=None):
         return ("Credit stress", f"{v:.2f}% (3 months ago {before:.2f}%)", mood,
                 "Extra interest risky companies pay to borrow. Rising fast = lenders worried.")
 
-    def breadth():
+    def breadth_check():
         s = signals if signals is not None else get_price_signals(DEFAULT_TICKERS)
         share = (s["last"] > s["ma200"]).mean()
         return ("Breadth", f"{share:.0%} of {len(s)} big stocks above their 200-day average",
                 "good" if share > 0.6 else "warn" if share > 0.4 else "bad",
                 "A rise carried by only a few stocks is fragile.")
 
-    for fn in (trend, vix, curve, credit, breadth):
+    for fn in (trend, vix, curve, credit) + ((breadth_check,) if breadth else ()):
         safe(fn)
     bad = sum(c[2] == "bad" for c in out)
     warn = sum(c[2] == "warn" for c in out)
@@ -1333,10 +1369,13 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
 
 
 def _mark(test, prices):
-    value = test["cash"] + sum(pos["shares"] * prices.get(t, pos["cost"])
+    # A manual trade only fetches that one stock's price: keep the others' last known.
+    last = test.get("last_prices", {})
+    last.update({t: p for t, p in prices.items() if p == p})          # p == p: not NaN
+    last = test["last_prices"] = {t: last[t] for t in test["positions"] if t in last}
+    value = test["cash"] + sum(pos["shares"] * last.get(t, pos["cost"])
                                for t, pos in test["positions"].items())
     test["value"] = value
-    test["last_prices"] = {t: prices[t] for t in test["positions"] if prices.get(t) == prices.get(t)}
     test["spy_now"] = prices.get(BENCH, test.get("spy_now", test["spy_start"]))
     test["history"].append([f"{datetime.now():%Y-%m-%d %H:%M}", round(value, 2),
                             round(test["cash0"] * test["spy_now"] / test["spy_start"], 2)])
@@ -1523,6 +1562,9 @@ def main():
     p.add_argument("--market-filter", action="store_true",
                    help="hold cash when SPY is below its 200-day average (tested 2026-10: did worse)")
     p.set_defaults(func=cmd_backtest)
+
+    sub.add_parser("daily", help="unattended: journal a pick, check watchlist, update practice"
+                   ).set_defaults(func=cmd_daily)
 
     sub.add_parser("market", help="market weather: trend, fear, recession and credit signals"
                    ).set_defaults(func=cmd_market)

@@ -27,6 +27,54 @@ PACKAGES = {"yfinance": "yfinance", "pandas": "pandas", "requests": "requests",
             "matplotlib": "matplotlib"}
 
 
+PALETTE = {"bg": "#f4f6fb", "card": "#ffffff", "accent": "#2563eb", "accent_dark": "#1d4ed8",
+           "text": "#111827", "muted": "#6b7280", "line": "#dfe3ec", "stripe": "#f7f9fc",
+           "good": "#15803d", "warn": "#b45309", "bad": "#b91c1c", "info": "#6b7280"}
+
+
+def apply_style(root):
+    """Light, flat theme on ttk's 'clam' (ships with Python; no extra installs)."""
+    p = PALETTE
+    s = ttk.Style(root)
+    s.theme_use("clam")
+    root.configure(background=p["bg"])
+    base = ("Segoe UI", 10)
+    s.configure(".", background=p["bg"], foreground=p["text"], font=base, bordercolor=p["line"],
+                lightcolor=p["bg"], darkcolor=p["bg"], troughcolor=p["line"])
+    s.configure("TLabelframe", background=p["bg"], bordercolor=p["line"], relief="solid")
+    s.configure("TLabelframe.Label", background=p["bg"], foreground=p["accent"],
+                font=("Segoe UI Semibold", 11))
+    s.configure("TNotebook", background=p["bg"], borderwidth=0, tabmargins=(0, 4, 0, 0))
+    s.configure("TNotebook.Tab", padding=(16, 7), background="#e6eaf2", foreground=p["muted"],
+                font=("Segoe UI Semibold", 10), borderwidth=0)
+    s.map("TNotebook.Tab", background=[("selected", p["bg"])], foreground=[("selected", p["accent"])])
+    s.configure("TButton", padding=(10, 5), background=p["card"], relief="flat")
+    s.map("TButton", background=[("active", "#e8eefc"), ("disabled", p["bg"])])
+    for name in ("Accent.TButton", "Big.TButton"):
+        s.configure(name, background=p["accent"], foreground="white", padding=(16, 8),
+                    font=("Segoe UI Semibold", 11))
+        s.map(name, background=[("active", p["accent_dark"]), ("disabled", "#9db9f5")],
+              foreground=[("disabled", "white")])
+    s.configure("TEntry", fieldbackground=p["card"], padding=4)
+    s.configure("TCombobox", fieldbackground=p["card"], padding=3)
+    s.configure("TSpinbox", fieldbackground=p["card"], padding=3)
+    s.configure("Treeview", background=p["card"], fieldbackground=p["card"], rowheight=26,
+                bordercolor=p["line"], font=base)
+    s.configure("Treeview.Heading", background="#eef1f7", foreground=p["text"], relief="flat",
+                font=("Segoe UI Semibold", 10), padding=(4, 5))
+    s.map("Treeview", background=[("selected", "#dbe7fe")], foreground=[("selected", p["text"])])
+    s.configure("Title.TLabel", font=("Segoe UI Semibold", 17), foreground=p["text"])
+    s.configure("Muted.TLabel", foreground=p["muted"])
+    s.configure("Bold.TLabel", font=("Segoe UI Semibold", 10))
+    s.configure("Step.TLabel", font=("Segoe UI Semibold", 12), foreground=p["accent"])
+    s.configure("Card.TLabel", font=("Consolas", 10), background=p["bg"])
+    for mood in ("good", "warn", "bad", "info"):
+        s.configure(f"{mood.title()}.TLabel", foreground=p[mood])
+    s.configure("Status.TFrame", background="#e6eaf2")
+    s.configure("Status.TLabel", background="#e6eaf2", foreground=p["muted"])
+    s.configure("TProgressbar", background=p["accent"])
+
+
 def log_error(text):
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("a", encoding="utf-8") as f:
@@ -94,6 +142,36 @@ def create_shortcut():
     return Path(r.stdout.strip())
 
 
+DAILY_TASK = "Stock Tracker daily"
+
+
+def pythonw():
+    exe = Path(sys.executable)
+    return exe.with_name("pythonw.exe") if exe.with_name("pythonw.exe").exists() else exe
+
+
+def daily_task_exists():
+    r = subprocess.run(["schtasks", "/Query", "/TN", DAILY_TASK], capture_output=True,
+                       creationflags=NO_WINDOW)
+    return r.returncode == 0
+
+
+def set_daily_task(on, at="17:30"):
+    """Weekday Task Scheduler job running `stock_tracker.py daily` without a window."""
+    if on:
+        datetime.strptime(at, "%H:%M")          # ValueError on a bad time
+        cmd = ["schtasks", "/Create", "/F", "/TN", DAILY_TASK, "/SC", "WEEKLY",
+               "/D", "MON,TUE,WED,THU,FRI", "/ST", at,
+               "/TR", f'"{pythonw()}" "{APP_DIR / "stock_tracker.py"}" daily']
+    else:
+        if not daily_task_exists():
+            return
+        cmd = ["schtasks", "/Delete", "/F", "/TN", DAILY_TASK]
+    r = subprocess.run(cmd, capture_output=True, text=True, creationflags=NO_WINDOW)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or r.stdout.strip())
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -104,33 +182,164 @@ class App:
         self.event_urls = {}
         self.hist = None
 
-        root.title("Stock Tracker (buy-only research, not financial advice)")
-        root.geometry("1150x720")
-        root.minsize(900, 560)
-        style = ttk.Style()
-        style.configure("Card.TLabel", font=("Consolas", 10))
-        style.configure("Big.TButton", font=("Segoe UI", 11, "bold"), padding=6)
+        self.statuses = {}
+        root.title("Stock Tracker")
+        root.geometry("1220x780")
+        root.minsize(980, 620)
+        apply_style(root)
+
+        head = ttk.Frame(root, padding=(14, 10, 14, 0))
+        head.pack(fill="x")
+        ttk.Label(head, text="Stock Tracker", style="Title.TLabel").pack(side="left")
+        ttk.Label(head, text="   Buy-only research tool. It can't predict prices. Not financial advice.",
+                  style="Muted.TLabel").pack(side="left", pady=(6, 0))
 
         nb = ttk.Notebook(root)
-        nb.pack(fill="both", expand=True, padx=6, pady=(6, 0))
+        nb.pack(fill="both", expand=True, padx=10, pady=(6, 0))
         self.nb = nb
-        self.build_pick(ttk.Frame(nb, padding=8))
-        self.build_history(ttk.Frame(nb, padding=8))
-        self.build_watch(ttk.Frame(nb, padding=8))
-        self.build_track(ttk.Frame(nb, padding=8))
-        self.build_backtest(ttk.Frame(nb, padding=8))
-        self.settings_tab = ttk.Frame(nb, padding=8)
-        self.build_settings(self.settings_tab)
+        self.tabs = {}
+        for name, build in (("Home", self.build_home), ("Pick", self.build_pick),
+                            ("Practice", self.build_practice), ("Watchlist", self.build_watch),
+                            ("History", self.build_history), ("Track record", self.build_track),
+                            ("Backtest", self.build_backtest), ("Settings", self.build_settings)):
+            self.tabs[name] = ttk.Frame(nb, padding=12)
+            build(self.tabs[name])
+        self.settings_tab = self.tabs["Settings"]
 
-        bar = ttk.Frame(root, padding=(6, 3))
+        bar = ttk.Frame(root, padding=(12, 4), style="Status.TFrame")
         bar.pack(fill="x")
         self.status = tk.StringVar(value="Ready.")
-        ttk.Label(bar, textvariable=self.status).pack(side="left")
+        ttk.Label(bar, textvariable=self.status, style="Status.TLabel").pack(side="left")
         self.spinner = ttk.Progressbar(bar, mode="indeterminate", length=160)
 
         self.refresh_watchlist()
         root.after(100, self.poll)
         root.after(400, self.offer_shortcut)
+        root.after(700, lambda: self.do_weather(breadth=False))
+
+    def go(self, tab):
+        self.nb.select(self.tabs[tab])
+
+    def make_tree(self, parent, cols, heads, widths, height=None, stretch_last=False):
+        """Table with a scrollbar and striped rows."""
+        box = ttk.Frame(parent)
+        box.pack(fill="both", expand=True)
+        tv = ttk.Treeview(box, columns=cols, show="headings", selectmode="browse",
+                          **({"height": height} if height else {}))
+        for i, (c, h, w) in enumerate(zip(cols, heads, widths)):
+            tv.heading(c, text=h)
+            tv.column(c, width=w, anchor="w" if w >= 150 else "center",
+                      stretch=stretch_last and i == len(cols) - 1 or not stretch_last)
+        tv.tag_configure("odd", background=PALETTE["stripe"])
+        sb = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        return tv
+
+    def fill_tree(self, tv, rows):
+        """rows: values tuples, or (values, tags) pairs."""
+        tv.delete(*tv.get_children())
+        for i, row in enumerate(rows):
+            values, tags = row if len(row) == 2 and isinstance(row[1], tuple) else (row, ())
+            tv.insert("", "end", values=values, tags=tags + (("odd",) if i % 2 else ()))
+
+    # ------------------------------------------------------------- home tab
+    def build_home(self, f):
+        self.nb.add(f, text="Home")
+        left = ttk.Frame(f)
+        left.pack(side="left", fill="both", expand=True)
+        steps = ttk.LabelFrame(left, text="How to use it", padding=12)
+        steps.pack(fill="x")
+        for i, (text, tab) in enumerate((
+                ("Find a stock worth researching (about a minute)", "Pick"),
+                ("Read its checklist: forecasts, insiders, risks", "Pick"),
+                ("Try it with pretend money at live prices", "Practice"),
+                ("Watch it: news, filings, alerts", "Watchlist"),
+                ("See whether the picks have actually worked", "Track record")), 1):
+            row = ttk.Frame(steps)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=f"{i}.", width=3, style="Step.TLabel").pack(side="left")
+            ttk.Label(row, text=text).pack(side="left")
+            ttk.Button(row, text=f"Open {tab}", command=lambda t=tab: self.go(t)).pack(side="right")
+
+        glance = ttk.LabelFrame(left, text="At a glance", padding=12)
+        glance.pack(fill="both", expand=True, pady=(10, 0))
+        self.glance = tk.StringVar()
+        ttk.Label(glance, textvariable=self.glance, justify="left", wraplength=520).pack(anchor="w")
+        self.update_glance()
+
+        right = ttk.LabelFrame(f, text="Market weather (today, not a forecast)", padding=12)
+        right.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        bar = ttk.Frame(right)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="Refresh", command=lambda: self.do_weather(True)).pack(side="left")
+        ttk.Label(bar, text="  Includes breadth (slower, ~40 s).", style="Muted.TLabel").pack(side="left")
+        self.weather_box = ttk.Frame(right)
+        self.weather_box.pack(fill="both", expand=True, pady=(8, 0))
+        ttk.Label(self.weather_box, text="Loading...", style="Muted.TLabel").pack(anchor="w")
+
+    def update_glance(self):
+        s = st.load_state()
+        tests = st.load_practice()["tests"]
+        running = [x for x in tests if x["status"] == "running"]
+        alerts = [f"{t}: {msg}" for t, msg in self.statuses.items() if msg != "OK"]
+        picks = st.PICKS_FILE.exists() and len(st.pd.read_csv(st.PICKS_FILE).query("rank == 1"))
+        lines = [f"Watchlist: {len(s['watchlist'])} stocks"
+                 + (f" ({', '.join(s['watchlist'])})" if s["watchlist"] else " (add some on the Pick tab)")]
+        lines += ["Alerts from your last check:"] + [f"  - {a}" for a in alerts] if alerts else \
+            ["Alerts: none yet (Watchlist > Check for updates)."]
+        lines.append(f"Practice tests running: {len(running)}" + "".join(
+            f"\n  - {x['name']}: {st.money(x.get('value'))} ({st.pct(x.get('value', x['cash0']) / x['cash0'] - 1)})"
+            for x in running))
+        lines.append(f"Picks saved in your journal: {picks or 0} runs")
+        lines.append("SEC contact email: " + ("set" if s.get("contact") else "not set (Settings)"))
+        self.glance.set("\n".join(lines))
+
+    def do_weather(self, breadth=True):
+        if self.busy:
+            return
+        self.run_bg("Checking market weather...", lambda: st.market_weather(breadth=breadth),
+                    self.weather_done)
+
+    def weather_done(self, result):
+        checks, summary = result
+        for w in self.weather_box.winfo_children():
+            w.destroy()
+        for name, res, mood, why in checks:
+            row = ttk.Frame(self.weather_box)
+            row.pack(fill="x", pady=4)
+            ttk.Label(row, text="●", style=f"{mood.title()}.TLabel", font=("Segoe UI", 14)).pack(side="left")
+            txt = ttk.Frame(row)
+            txt.pack(side="left", fill="x", padx=6)
+            ttk.Label(txt, text=f"{name}: {res}", style="Bold.TLabel").pack(anchor="w")
+            ttk.Label(txt, text=why, style="Muted.TLabel", wraplength=470).pack(anchor="w")
+        ttk.Label(self.weather_box, text=summary, wraplength=500, justify="left").pack(anchor="w", pady=(8, 0))
+        self.update_glance()
+
+    def show_checklist(self, ticker, checks):
+        win = tk.Toplevel(self.root)
+        win.title(f"Checklist: {ticker}")
+        win.geometry("720x640")
+        win.configure(background=PALETTE["bg"])
+        box = ttk.Frame(win, padding=14)
+        box.pack(fill="both", expand=True)
+        ttk.Label(box, text=f"{ticker} checklist", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(box, text="Extra facts, not part of the score (Yahoo keeps no history of most, so "
+                  "they can't be backtested).", style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
+        for name, res, mood, why in checks:
+            row = ttk.Frame(box)
+            row.pack(fill="x", pady=4)
+            ttk.Label(row, text="●", style=f"{mood.title()}.TLabel", font=("Segoe UI", 14)).pack(side="left")
+            txt = ttk.Frame(row)
+            txt.pack(side="left", fill="x", padx=6)
+            ttk.Label(txt, text=f"{name}: {res}", style="Bold.TLabel", wraplength=620).pack(anchor="w")
+            ttk.Label(txt, text=why, style="Muted.TLabel", wraplength=620).pack(anchor="w")
+        legend = ttk.Frame(box)
+        legend.pack(anchor="w", pady=(10, 0))
+        for mood, text in (("good", "good"), ("warn", "worth a look"), ("bad", "warning"), ("info", "info")):
+            ttk.Label(legend, text="●", style=f"{mood.title()}.TLabel").pack(side="left")
+            ttk.Label(legend, text=text + "    ", style="Muted.TLabel").pack(side="left")
 
     # ------------------------------------------------------ background work
     def run_bg(self, label, fn, done):
@@ -178,10 +387,10 @@ class App:
 
     # ------------------------------------------------------------- pick tab
     def build_pick(self, f):
-        self.nb.add(f, text="  Pick  ")
+        self.nb.add(f, text="Pick")
         top = ttk.Frame(f)
         top.pack(fill="x")
-        ttk.Button(top, text="Find best buy candidate", style="Big.TButton",
+        ttk.Button(top, text="Find best buy candidates", style="Accent.TButton",
                    command=self.do_pick).pack(side="left")
         ttk.Label(top, text="   Min company size ($ billions):").pack(side="left")
         self.min_mcap = tk.StringVar(value="10")
@@ -189,42 +398,46 @@ class App:
         ttk.Label(top, text="   Stop-loss %:").pack(side="left")
         self.pick_stop = tk.StringVar(value="15")
         ttk.Entry(top, textvariable=self.pick_stop, width=5).pack(side="left")
-        ttk.Label(top, text=f"   Screens {len(st.DEFAULT_TICKERS)} large US companies.",
-                  foreground="gray").pack(side="left")
+        ttk.Label(top, text=f"   Screens {len(st.DEFAULT_TICKERS)} large US companies (~1 minute).",
+                  style="Muted.TLabel").pack(side="left")
 
         body = ttk.Frame(f)
-        body.pack(fill="both", expand=True, pady=8)
-        left = ttk.LabelFrame(body, text="Candidate", padding=8)
+        body.pack(fill="both", expand=True, pady=10)
+        left = ttk.LabelFrame(body, text="Selected stock", padding=10)
         left.pack(side="left", fill="both", expand=True)
-        self.card = tk.Text(left, width=60, height=20, wrap="word", font=("Consolas", 10),
-                            relief="flat", background=self.root.cget("background"))
+        self.card = tk.Text(left, width=62, height=20, wrap="word", font=("Consolas", 10),
+                            relief="flat", background=PALETTE["card"], padx=10, pady=8,
+                            highlightthickness=1, highlightbackground=PALETTE["line"])
         self.card.pack(fill="both", expand=True)
-        self.set_card("Press \"Find best buy candidate\". It takes about a minute.\n\n"
+        self.set_card("Press \"Find best buy candidates\".\n\n"
+                      "It ranks big US companies on value, quality, growth and momentum,\n"
+                      "after dropping any that fail basic safety checks.\n\n"
                       "A high score means 'looks strong on these measures today',\n"
                       "not 'will go up'.")
         btns = ttk.Frame(left)
-        btns.pack(fill="x", pady=(6, 0))
-        self.pick_add = ttk.Button(btns, text="Add to watchlist", command=self.pick_to_watch,
-                                   state="disabled")
-        self.pick_add.pack(side="left")
-        self.pick_hist = ttk.Button(btns, text="View history", command=self.pick_to_history,
-                                    state="disabled")
-        self.pick_hist.pack(side="left", padx=6)
+        btns.pack(fill="x", pady=(8, 0))
+        self.pick_btns = []
+        for text, cmd in (("Checklist", self.pick_checklist), ("Add to watchlist", self.pick_to_watch),
+                          ("View history", self.pick_to_history),
+                          ("Practice with top 5", self.pick_to_practice)):
+            b = ttk.Button(btns, text=text, command=cmd, state="disabled")
+            b.pack(side="left", padx=(0, 6))
+            self.pick_btns.append(b)
 
         right = ttk.Frame(body)
-        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
-        ttk.Label(right, text="Ranked candidates (click a row to see it):").pack(anchor="w")
-        cols = ("rank", "ticker", "name", "score", "price")
-        self.rank_tv = ttk.Treeview(right, columns=cols, show="headings", height=10,
-                                    selectmode="browse")
-        for c, w in zip(cols, (45, 70, 200, 60, 90)):
-            self.rank_tv.heading(c, text=c.title())
-            self.rank_tv.column(c, width=w, anchor="w" if c == "name" else "center")
-        self.rank_tv.pack(fill="both", expand=True)
+        right.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        ttk.Label(right, text="Ranked (click a row). 'Settled' = how often it stays in the top 5 when "
+                  "the weights are nudged.", style="Muted.TLabel", wraplength=480).pack(anchor="w")
+        cols = ("rank", "ticker", "name", "score", "settled", "price")
+        self.rank_tv = self.make_tree(right, cols, ("#", "Ticker", "Company", "Score", "Settled", "Price"),
+                                      (40, 65, 190, 60, 70, 85), height=10)
+        self.rank_tv.tag_configure("basket", font=("Segoe UI Semibold", 10))
         self.rank_tv.bind("<<TreeviewSelect>>", lambda e: self.show_candidate())
-        ttk.Label(right, text="Safety filters (stocks removed):").pack(anchor="w", pady=(8, 0))
+        ttk.Label(right, text=st.BASKET_NOTE.replace("\n", " "), wraplength=480,
+                  style="Bold.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(right, text="Safety filters (stocks removed):", style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
         self.filters = tk.StringVar()
-        ttk.Label(right, textvariable=self.filters, justify="left").pack(anchor="w")
+        ttk.Label(right, textvariable=self.filters, justify="left", style="Muted.TLabel").pack(anchor="w")
 
     def set_card(self, text):
         self.card.configure(state="normal")
@@ -257,9 +470,11 @@ class App:
                           "That itself is a signal to be patient.")
             return
         for i, (t, r) in enumerate(df.iterrows(), 1):
-            self.rank_tv.insert("", "end", iid=t, values=(i, t, r["name"], f"{r['score']:.2f}",
-                                                         st.money(r["price"])))
+            tags = (("basket",) if i <= 5 else ()) + (("odd",) if i % 2 == 0 else ())
+            self.rank_tv.insert("", "end", iid=t, tags=tags, values=(
+                i, t, r["name"], f"{r['score']:.2f}", f"{r['stable5']:.0%}", st.money(r["price"])))
         self.rank_tv.selection_set(df.index[0])
+        self.update_glance()
 
     def selected_ticker(self):
         sel = self.rank_tv.selection()
@@ -287,12 +502,26 @@ class App:
             f"Yearly volatility:  {st.pct(r['vol_1y'])}  (typical yearly swing)\n"
             f"Analyst target:     {st.pct(r['analystUpside'])} vs today "
             f"(consensus: {r['recommendation'] or 'n/a'})\n\n"
+            f"How settled: #1 in {r['stable1']:.0%}, top 5 in {r['stable5']:.0%} of 200\n"
+            f"  small changes to the weights. Low = a coin toss between close scores.\n\n"
             f"If you buy (whole shares, cash account, no margin):\n"
             f"  Suggested stop-loss: {st.money(stop)} ({self.stop_frac:.0%} below today).\n"
+            f"  The Checklist also gives one sized to this stock's normal swings.\n"
             f"  Selling there caps your loss; you can never lose more than you invest.\n"
             f"  Keep any single stock to a small slice of your savings (many use <=5%).")
-        self.pick_add.configure(state="normal")
-        self.pick_hist.configure(state="normal")
+        for b in self.pick_btns:
+            b.configure(state="normal")
+
+    def pick_checklist(self):
+        t = self.selected_ticker()
+        if t:
+            wl = list(st.load_state()["watchlist"])
+            self.run_bg(f"Checking {t} (forecasts, insiders, risks)...",
+                        lambda: st.company_checks(t, wl), lambda c: self.show_checklist(t, c))
+
+    def pick_to_practice(self):
+        self.practice_use_top5()
+        self.go("Practice")
 
     def pick_to_watch(self):
         t = self.selected_ticker()
@@ -305,12 +534,12 @@ class App:
         t = self.selected_ticker()
         if t:
             self.hist_ticker.set(t)
-            self.nb.select(1)
+            self.go("History")
             self.do_history()
 
     # ---------------------------------------------------------- history tab
     def build_history(self, f):
-        self.nb.add(f, text="  History  ")
+        self.nb.add(f, text="History")
         top = ttk.Frame(f)
         top.pack(fill="x")
         ttk.Label(top, text="Ticker:").pack(side="left")
@@ -398,7 +627,7 @@ class App:
 
     # -------------------------------------------------------- watchlist tab
     def build_watch(self, f):
-        self.nb.add(f, text="  Watchlist  ")
+        self.nb.add(f, text="Watchlist")
         cols = ("ticker", "bought", "price", "gain", "stop", "status")
         heads = ("Ticker", "Bought at", "Price", "Gain", "Stop-loss level", "Status")
         self.pos_tv = ttk.Treeview(f, columns=cols, show="headings", height=6, selectmode="browse")
@@ -507,17 +736,7 @@ class App:
         show_all = self.show_all.get()
 
         def work():
-            state = st.load_state()
-            results = {}
-            for i, t in enumerate(state["watchlist"], 1):
-                self.progress(f"Checking {t} ({i}/{len(state['watchlist'])})...")
-                results[t] = st.check_ticker(t, state, days, show_all)
-            # Re-read before saving: the watchlist or email may have changed meanwhile.
-            with st.STATE_LOCK:
-                fresh = st.load_state()
-                fresh["seen"].update({t: state["seen"][t] for t in results if t in fresh["watchlist"]})
-                st.save_state(fresh)
-            return results, st.save_report(results) if results else None
+            return st.watch_all(days, show_all, self.progress)
 
         if not st.load_state()["watchlist"]:
             messagebox.showinfo("Stock Tracker", "Your watchlist is empty. Add a ticker first.")
@@ -552,7 +771,9 @@ class App:
                     self.event_urls[iid] = e["url"]
             if r["note"]:
                 self.ev_tv.insert("", "end", values=(t, "", "Note", r["note"]))
+        self.statuses = statuses
         self.refresh_watchlist(statuses)
+        self.update_glance()
         if report:
             self.status.set(f"Done. Report saved to {report}")
 
@@ -563,7 +784,7 @@ class App:
 
     # --------------------------------------------------------- practice tab
     def build_practice(self, f):
-        self.nb.add(f, text="  Practice  ")
+        self.nb.add(f, text="Practice")
         new = ttk.LabelFrame(f, text="Start a practice test (pretend money, live prices)", padding=8)
         new.pack(fill="x")
         self.p_tickers = tk.StringVar()
@@ -694,6 +915,7 @@ class App:
         if self.p_tests:
             self.p_combo.current(ids.index(keep["id"]) if keep and keep["id"] in ids else 0)
         self.practice_show()
+        self.update_glance()
         for x in self.p_tests:
             if before.get(x["id"]) == "running" and x["status"] == "ended":
                 messagebox.showinfo("Practice test ended", "\n".join(st.practice_lines(x)))
@@ -724,10 +946,14 @@ class App:
         if len(test["history"]) > 1:
             h = st.pd.DataFrame(test["history"], columns=["time", "value", "spy"])
             h["time"] = st.pd.to_datetime(h["time"])
-            ax.plot(h["time"], h["value"], color="#2563eb", linewidth=2, label="Your test")
-            ax.plot(h["time"], h["spy"], color="#6b7280", linewidth=1.2, label=f"Same money in {st.BENCH}")
+            short = h["time"].iloc[-1] - h["time"].iloc[0] < st.pd.Timedelta(days=1)
+            x = range(len(h)) if short else h["time"]      # dates look silly within one day
+            ax.plot(x, h["value"], color="#2563eb", linewidth=2, label="Your test")
+            ax.plot(x, h["spy"], color="#6b7280", linewidth=1.2, label=f"Same money in {st.BENCH}")
             ax.legend(fontsize=8)
-            self.p_fig.autofmt_xdate()
+            ax.set_xlabel("price updates" if short else "")
+            if not short:
+                self.p_fig.autofmt_xdate()
         else:
             ax.text(0.5, 0.5, "Chart fills in as prices update", ha="center", va="center",
                     transform=ax.transAxes, color="gray")
@@ -738,7 +964,7 @@ class App:
 
     # ----------------------------------------------------- track record tab
     def build_track(self, f):
-        self.nb.add(f, text="  Track record  ")
+        self.nb.add(f, text="Track record")
         top = ttk.Frame(f)
         top.pack(fill="x")
         ttk.Button(top, text="Refresh", style="Big.TButton", command=self.do_track).pack(side="left")
@@ -787,7 +1013,7 @@ class App:
 
     # --------------------------------------------------------- backtest tab
     def build_backtest(self, f):
-        self.nb.add(f, text="  Backtest  ")
+        self.nb.add(f, text="Backtest")
         top = ttk.Frame(f)
         top.pack(fill="x")
         ttk.Button(top, text="Run backtest", style="Big.TButton",
@@ -863,7 +1089,7 @@ class App:
 
     # --------------------------------------------------------- settings tab
     def build_settings(self, f):
-        self.nb.add(f, text="  Settings  ")
+        self.nb.add(f, text="Settings")
         box = ttk.LabelFrame(f, text="SEC filings", padding=10)
         box.pack(fill="x")
         ttk.Label(box, text="The SEC's free filings service asks for a contact email. It is "
@@ -882,6 +1108,23 @@ class App:
                    command=self.make_shortcut).pack(side="left")
         ttk.Button(box, text="Open data & reports folder",
                    command=self.open_data).pack(side="left", padx=6)
+
+        box = ttk.LabelFrame(f, text="Automatic daily run", padding=10)
+        box.pack(fill="x")
+        ttk.Label(box, wraplength=900, justify="left", text=(
+            "Every weekday at the time below (while you're logged in), Windows runs the tracker "
+            "in the background: it saves that day's pick to your journal (so the Track record "
+            "grows), checks your watchlist, and updates practice tests. Nothing is bought or "
+            "sold for real. Log: daily.log in the data folder.")).pack(anchor="w")
+        row = ttk.Frame(box)
+        row.pack(anchor="w", pady=(6, 0))
+        ttk.Label(row, text="Time (24h):").pack(side="left")
+        self.daily_time = tk.StringVar(value="17:30")
+        ttk.Entry(row, textvariable=self.daily_time, width=6).pack(side="left", padx=4)
+        ttk.Button(row, text="Turn on", command=lambda: self.set_daily(True)).pack(side="left")
+        ttk.Button(row, text="Turn off", command=lambda: self.set_daily(False)).pack(side="left", padx=6)
+        self.daily_state = tk.StringVar(value="Status: " + ("ON" if daily_task_exists() else "off"))
+        ttk.Label(row, textvariable=self.daily_state, style="Bold.TLabel").pack(side="left", padx=8)
 
         ttk.Label(f, justify="left", foreground="#374151", text=(
             "About this tool\n\n"
@@ -911,6 +1154,14 @@ class App:
             messagebox.showerror("Stock Tracker", f"Couldn't create the shortcut:\n{e}")
             return
         messagebox.showinfo("Stock Tracker", f"Shortcut created:\n{p}")
+
+    def set_daily(self, on):
+        try:
+            set_daily_task(on, self.daily_time.get().strip())
+        except Exception as e:
+            messagebox.showerror("Stock Tracker", f"Couldn't change the daily run:\n{e}")
+            return
+        self.daily_state.set("Status: " + ("ON" if daily_task_exists() else "off"))
 
     def open_data(self):
         st.HOME.mkdir(parents=True, exist_ok=True)
