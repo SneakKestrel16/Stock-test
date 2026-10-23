@@ -182,7 +182,14 @@ Ranked by expected value for effort. Same rule: measure before keeping.
 1. **BUILT** (`practice start --follow`, Practice tab checkbox). **Practice "follow the picks" mode.** A practice test that re-buys the
    current top 5 every month. The honest real-time test of the exact strategy
    the backtest measures, without hindsight in the stock list going forward.
-2. **Hindsight-free stock list.** Use S&P 500 membership as of each backtest
+2. **BUILT and run 2026-10-23** (`backtest --universe sp500`). Top 5 $55,375
+   (+18.5%/yr, worst drop -26.2%) vs SPY $41,358 and equal-weight members
+   $32,681; top pick alone $12,048 (-52.3% worst drop). So the edge shrinks a
+   lot without hindsight but the basket still led; the single top pick is not
+   usable. Coverage per month: ~501 members, 461 priced, 453 valued (missing =
+   mostly bought out / delisted, Yahoo drops them: some survivorship left).
+   Next: rerun the rejected options (`--every`, `--sector-cap`) on this universe.
+   **Hindsight-free stock list.** Use S&P 500 membership as of each backtest
    date (Wikipedia keeps a table of changes; unverified source) so the backtest
    stops choosing among today's winners. Biggest known flaw in the numbers.
 3. **Out-of-sample check.** Before trusting any weight change, tune on

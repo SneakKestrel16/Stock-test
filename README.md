@@ -98,6 +98,24 @@ companies, i.e. "just buy the market"):
   30 days in `~/.stock_tracker/sec_facts/`). Main limits: the stock list is
   today's winners (hindsight), so compare with "all stocks, equal" too;
   trailing P/E instead of forecasts; no costs or taxes.
+  `--universe sp500` removes most of that hindsight: it chooses from the
+  S&P 500 as it stood at each month-end (from Wikipedia's page history).
+
+**Results, Sep 2016 to Oct 2026, $10,000 start, held one month, re-picked
+monthly** (real data, run 2026-10-23):
+
+| | Today's 64-stock list | S&P 500 as it was then |
+|---|---|---|
+| Top 5 basket | $80,211 | **$55,375** (+18.5%/yr, worst drop -26.2%) |
+| Top pick alone | $48,502 | $12,048 (+1.9%/yr, worst drop -52.3%) |
+| SPY | $41,358 | $41,358 (+15.1%/yr, worst drop -23.9%) |
+| Every stock, equal | $65,448 | $32,681 |
+
+The hindsight-free top 5 still beat SPY, but by much less than the 64-stock
+list suggested. **Buying only the top pick did badly**: one stock is too much
+luck. Use the basket. About 8% of past members had no Yahoo price data
+(bought out or delisted), so a little hindsight remains. Past results don't
+promise future ones.
 
 ## Where data is stored
 
