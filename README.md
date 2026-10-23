@@ -52,6 +52,11 @@ use the shortcut. Tabs:
   best set overall held overnight (5% trailing stop, no take-profit):
   $10,831 on the unseen days vs SPY $10,016, but that is swing trading, not
   day trading, and 30 days is a small test.
+  **Swing** (Practice tab or `practice swing`) runs that best set forward in
+  real time with pretend money: holds overnight for the chosen days, sells a
+  stock 5% below its highest price since buying, puts that money into the
+  next-ranked stock, and re-ranks each trading morning. Stops are checked
+  while the app is open (every 5 minutes) or when you run `practice`.
 - **Watchlist**, **History**, **Track record** (your past picks vs SPY),
   **Backtest** (the pick replayed over 10 past years) and **Settings** (SEC
   email, shortcut, light/dark colours, accent colour, text size, and an
@@ -70,6 +75,7 @@ py stock_tracker.py market                   # market weather
 py stock_tracker.py practice start MSFT KO --days 30 --take-profit 0.3
 py stock_tracker.py practice day             # trade today's top 5 until the close (market hours)
 py stock_tracker.py practice replay --days 30  # replay day trading on past 5-minute prices
+py stock_tracker.py practice swing --days 30  # hold the top 5 overnight with a 5% trailing stop
 py stock_tracker.py practice                 # update and show practice tests
 py stock_tracker.py history MSFT             # returns, worst drop, chart, CSV
 py stock_tracker.py add MSFT --bought 410.50 --stop 0.15

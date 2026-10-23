@@ -257,5 +257,5 @@ wider 3% stop +9 / -100, trailing +2 / +16, no take-profit +70 / +37, refill SPY
 three that won both. Selection bias: 144 sets tried on 30 days, so the train
 winner's edge is partly luck; its test result is the honest number.
 
-Idea: a "swing" practice mode with the best-on-train rules (hold overnight,
+**BUILT 2026-10-23** (`practice swing`, Practice tab). A "swing" practice mode with the best-on-train rules (hold overnight,
 5% trailing stop), tested forward in real time before trusting it.

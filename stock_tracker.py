@@ -1681,19 +1681,23 @@ def market_close_today():
 
 
 def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=None, name=None,
-                   follow=False, day=False):
+                   follow=False, day=False, swing=False):
     """Start a test: split `cash` evenly over `tickers`, whole shares, at live prices.
     follow: every 30 days, switch to the then-current top 5 (no tickers = today's top 5).
     That is the backtested strategy, run forward in real time.
     day: ends at today's close. With no tickers it buys today's top 5, and money from
-    each stop-loss / take-profit sale goes into the next stock in today's ranking."""
+    each stop-loss / take-profit sale goes into the next stock in today's ranking.
+    swing: holds overnight for `days` with SWING_RULES (trailing stop, no take-profit);
+    each sale's money buys the next-ranked stock, and each trading morning the ranking
+    is redone and spare cash buys top-5 stocks not held."""
     queue = []
     end = market_close_today() if day else None
-    if (follow or day) and not tickers:
+    if (follow or day or swing) and not tickers:
         ranked = screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0]
         tickers = basket(ranked)
-        queue = [t for t in ranked.index if t not in tickers] if day else []
-        name = name or ("Day trade " + f"{datetime.now():%Y-%m-%d}" if day else "Follow the picks")
+        queue = [t for t in ranked.index if t not in tickers] if day or swing else []
+        name = name or (f"Day trade {datetime.now():%Y-%m-%d}" if day else
+                        f"Swing {datetime.now():%Y-%m-%d}" if swing else "Follow the picks")
     tickers = [t.upper() for t in tickers]
     if not tickers or cash <= 0 or days < 1:
         raise ValueError("Give at least one ticker, cash above 0 and at least 1 day.")
@@ -1704,8 +1708,9 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
     now = datetime.now()
     test = {"id": f"{now:%Y%m%d-%H%M%S}", "name": name or ", ".join(tickers),
             "start": f"{now:%Y-%m-%d %H:%M}", "end": f"{end or now + timedelta(days=days):%Y-%m-%d %H:%M}",
-            "day": day, "queue": queue, "trail": day and DAY_RULES["trail"],
-            "refill": DAY_RULES["refill"] if day else "next",
+            "day": day, "queue": queue, "swing": swing,
+            "trail": (day and DAY_RULES["trail"]) or (swing and SWING_RULES["trail"]),
+            "refill": DAY_RULES["refill"] if day else "next", "ranked_on": f"{now:%Y-%m-%d}",
             "cash0": cash, "cash": cash, "stop_pct": stop_pct, "take_profit": take_profit,
             "positions": {}, "trades": [], "spy_start": prices[BENCH], "status": "running",
             "history": [], "follow": follow, "switched": f"{now:%Y-%m-%d %H:%M}"}
@@ -1713,6 +1718,11 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
     _mark(test, prices)
     with STATE_LOCK:
         p = load_practice()
+        ids = {x["id"] for x in p["tests"]}
+        base, n = test["id"], 1
+        while test["id"] in ids:                   # two tests started in the same second
+            n += 1
+            test["id"] = f"{base}-{n}"
         p["tests"].append(test)
         write_json(PRACTICE_FILE, p)
     return test
@@ -1795,8 +1805,8 @@ def _auto_sell(test, prices):
         price = prices.get(t)
         if not price or pd.isna(price):
             continue
-        if t == BENCH and test.get("day"):
-            continue                      # parked cash rides SPY until the close
+        if t == BENCH and (test.get("day") or test.get("swing")):
+            continue                      # parked cash rides SPY
         pos["peak"] = max(pos.get("peak", pos["cost"]), price)
         ref = pos["peak"] if test.get("trail") else pos["cost"]
         if price <= ref * (1 - test.get("stops", {}).get(t, test["stop_pct"])):
@@ -1805,7 +1815,7 @@ def _auto_sell(test, prices):
             _trade(test, t, "SELL", pos["shares"], price, "take-profit")
         else:
             continue
-        if test.get("day"):
+        if test.get("day") or test.get("swing"):
             _refill(test, prices)
 
 
@@ -1819,8 +1829,12 @@ def update_practice(end_now=None):
         return p["tests"]
     due = {x["id"] for x in running if x.get("follow") and datetime.now() - datetime.strptime(
         x.get("switched", x["start"]), "%Y-%m-%d %H:%M") >= timedelta(days=30)}
-    top = basket(screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0]) if due else []
-    spare = {t for x in running for t in x.get("queue", [])[:5]}      # day tests' next buys
+    today = f"{date.today()}"
+    morning = {x["id"] for x in running if x.get("swing") and x.get("ranked_on") != today
+               and market_status()[0]}                                # swing: first update of a trading day
+    ranked = screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0] if due or morning else None
+    top = basket(ranked) if ranked is not None else []
+    spare = {t for x in running for t in x.get("queue", [])[:5]}      # day / swing tests' next buys
     prices = live_prices(sorted({t for x in running for t in x["positions"]} | set(top) | spare | {BENCH}))
     with STATE_LOCK:
         p = load_practice()                 # re-read: a trade may have happened meanwhile
@@ -1828,6 +1842,13 @@ def update_practice(end_now=None):
             if test["status"] != "running":
                 continue
             _auto_sell(test, prices)
+            if test["id"] in morning and top:
+                test["ranked_on"] = today
+                test["queue"] = [t for t in ranked.index if t not in top]
+                want = [t for t in top if t not in test["positions"] and prices.get(t) == prices.get(t)
+                        and prices.get(t)]
+                if want and test["cash"] >= min(prices[t] for t in want):
+                    _buy_even(test, want, prices)
             if test["id"] in due and top:
                 _switch(test, top, prices)
             _mark(test, prices)
@@ -1895,6 +1916,11 @@ def run_day(test):
 # judge): trailing stop, no take-profit and refill into SPY each won on both halves.
 # Small gains (+$76 per $10,000 on the unseen days) and the rules still lost money.
 DAY_RULES = {"stop": 0.02, "atr": None, "trail": True, "tp": None, "refill": "spy", "overnight": False}
+
+
+# Best rule set on the first 30 of Yahoo's 60 days (2026-10-24); on the last 30, unseen,
+# it turned $10,000 into $10,831 vs SPY $10,016. One small test: practice it before trusting it.
+SWING_RULES = {"stop": 0.05, "atr": None, "trail": True, "tp": None, "refill": "next", "overnight": True}
 
 
 def replay_data(contact, say=print):
@@ -2034,8 +2060,8 @@ def replay_lines(days_df, summary):
 
 
 def cmd_practice(a):
-    day = a.action in ("day", "replay")
-    stop = a.stop if a.stop is not None else 0.02 if day else 0.15
+    day, swing = a.action in ("day", "replay"), a.action == "swing"
+    stop = a.stop if a.stop is not None else DAY_RULES["stop"] if day else SWING_RULES["stop"] if swing else 0.15
     tp = a.take_profit if a.take_profit is not None or not day else DAY_RULES["tp"]
     if a.action == "replay":
         try:
@@ -2049,15 +2075,17 @@ def cmd_practice(a):
             print(f"\nEvery trade saved to {a.csv}")
         return
     try:
-        if a.action in ("start", "day"):
-            test = start_practice(a.args, a.cash, a.days, stop, tp, follow=a.follow, day=day)
+        if a.action in ("start", "day", "swing"):
+            test = start_practice(a.args, a.cash, a.days, stop, tp, follow=a.follow, day=day, swing=swing)
             if day:
                 print(f"Day test {test['id']}: sells a stock {stop:.0%} below its highest price today"
                       + (f" or {tp:.0%} above cost" if tp else "") + f", cash goes to SPY; ends {test['end'][11:]} "
                       "your time. Ctrl+C stops watching; the app's Practice tab keeps it going.\n")
                 test = run_day(test)
             else:
-                print(f"Started practice test {test['id']}.")
+                print(f"Started practice test {test['id']}."
+                      + (f" Swing: holds overnight, sells a stock {stop:.0%} below its highest price since "
+                         "buying. Keep the app open (or run `practice`) so stops get checked." if swing else ""))
             tests = [test]
         elif a.action in ("buy", "sell"):
             test_id, t, n = a.args
@@ -2178,13 +2206,13 @@ def main():
 
     p = sub.add_parser("practice", help="practice trading with pretend money at live prices")
     p.add_argument("action", nargs="?", default="status",
-                   choices=["status", "start", "day", "replay", "buy", "sell", "end"])
+                   choices=["status", "start", "day", "swing", "replay", "buy", "sell", "end"])
     p.add_argument("args", nargs="*", help="start: TICKERS | day: [TICKERS] (none = today's top 5, "
-                   "trades until today's close) | buy/sell: TEST_ID TICKER SHARES | end: TEST_ID")
+                   "trades until today's close) | swing: [TICKERS] (holds overnight for --days) | buy/sell: TEST_ID TICKER SHARES | end: TEST_ID")
     p.add_argument("--cash", type=float, default=10000.0, help="pretend starting cash (default 10000)")
     p.add_argument("--days", type=int, default=30, help="how long the test runs; replay: trading days back (default 30)")
     p.add_argument("--csv", help="replay: save every trade to this CSV file")
-    p.add_argument("--stop", type=float, help="auto-sell this far below cost (default 0.15; day 0.02)")
+    p.add_argument("--stop", type=float, help="auto-sell this far below cost (default 0.15; day 0.02; swing 0.05 below the high)")
     p.add_argument("--take-profit", type=float, help="auto-sell this far above cost, e.g. 0.3 (day: none)")
     p.add_argument("--follow", action="store_true",
                    help="switch to the current top 5 every 30 days (no tickers = today's top 5)")

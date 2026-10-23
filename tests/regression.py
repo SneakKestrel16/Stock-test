@@ -89,6 +89,23 @@ for i, b in enumerate(tr):                 # every refill follows the sale that 
 starts = [x for x in tr if x["reason"] == "start"]
 assert day["cash0"] - sum(x["shares"] * x["price"] for x in starts) < min(x["price"] for x in starts)
 st.update_practice(end_now=day["id"])     # a running test would make the GUI check below refresh it
+
+# swing: trailing stop, sale money buys the next-ranked stock, each new trading morning
+# re-ranks and spends spare cash on top-5 stocks not held
+sw = st.start_practice([], 10000, 30, 0.05, None, swing=True)
+assert sw["swing"] and sw["trail"] and sw["queue"] and sw["end"][:10] > f"{date.today()}"
+with st.STATE_LOCK:
+    p = st.load_practice()
+    x = next(x for x in p["tests"] if x["id"] == sw["id"])
+    x["ranked_on"] = "2000-01-01"                        # pretend it's a new morning
+    st.write_json(st.PRACTICE_FILE, p)
+real_status, st.market_status = st.market_status, lambda now=None: (True, "open")
+sw = next(x for x in st.update_practice() if x["id"] == sw["id"])
+st.market_status = real_status
+assert sw["ranked_on"] == f"{date.today()}" and sw["status"] == "running"
+assert {"stop-loss", "next in ranking"} <= {x["reason"] for x in sw["trades"]}
+st.update_practice(end_now=sw["id"])
+print("ok swing test")
 st.market_close_today, st.screen = real_close, real_screen
 print("ok day test")
 

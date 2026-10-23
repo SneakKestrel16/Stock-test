@@ -1059,6 +1059,11 @@ class App:
             "Day trade: ends at today's close. With Stocks empty it buys today's top 5; sells a stock "
             "that falls 2% below its highest price today and puts that money in SPY. Market hours only.")
         ).pack(anchor="w", pady=(2, 0))
+        self.p_swing = tk.BooleanVar()
+        ttk.Checkbutton(new, variable=self.p_swing, command=lambda: self.practice_day_toggle("swing"), text=(
+            "Swing: holds overnight for the Days above. Sells a stock 5% below its highest price since "
+            "buying; that money buys the next-ranked stock. Re-ranks each trading morning.")
+        ).pack(anchor="w", pady=(2, 0))
         ttk.Label(new, style="Muted.TLabel", text=(
             "Money is split evenly over the stocks (whole shares). Prices update every 5 minutes "
             "while the app is open; you can also buy and sell yourself. Results list appears when it ends.")
@@ -1114,15 +1119,18 @@ class App:
             return
         self.p_tickers.set(" ".join(self.ranked.index[:5]))
 
-    def practice_day_toggle(self):
-        day = self.p_day.get()
-        self.p_stop.set("2" if day else "15")
+    def practice_day_toggle(self, clicked="day"):
+        if clicked == "swing" and self.p_swing.get():
+            self.p_day.set(False)
+        elif self.p_day.get():
+            self.p_swing.set(False)
+        day, swing = self.p_day.get(), self.p_swing.get()
+        self.p_stop.set("2" if day else "5" if swing else "15")
         self.p_tp.set("")
-        if day:
+        if day or swing:
             self.p_follow.set(False)
-        state = "disabled" if day else "normal"       # a day test ignores both
-        self.p_days_entry.configure(state=state)
-        self.p_follow_cb.configure(state=state)
+        self.p_days_entry.configure(state="disabled" if day else "normal")   # a day test ends today
+        self.p_follow_cb.configure(state="disabled" if day or swing else "normal")
 
     def practice_start(self):
         tickers = self.p_tickers.get().replace(",", " ").split()
@@ -1130,14 +1138,15 @@ class App:
             cash, days = float(self.p_cash.get()), int(self.p_days.get())
             stop = float(self.p_stop.get()) / 100
             tp = float(self.p_tp.get()) / 100 if self.p_tp.get().strip() else None
-            follow, day = self.p_follow.get(), self.p_day.get()
-            assert (tickers or follow or day) and cash > 0 and days >= 1 and 0 < stop < 1 and (tp is None or tp > 0)
+            follow, day, swing = self.p_follow.get(), self.p_day.get(), self.p_swing.get()
+            assert (tickers or follow or day or swing) and cash > 0 and days >= 1 and 0 < stop < 1 and (tp is None or tp > 0)
         except (ValueError, AssertionError):
             messagebox.showwarning("Stock Tracker", "Enter stocks (e.g. MSFT KO), cash, days, and the "
                                    "auto-sell % (between 1 and 99).")
             return
         self.run_bg("Starting practice test at live prices...",
-                    lambda: (st.start_practice(tickers, cash, days, stop, tp, follow=follow and not day, day=day),
+                    lambda: (st.start_practice(tickers, cash, days, stop, tp, follow=follow and not (day or swing),
+                                               day=day, swing=swing),
                              st.update_practice())[1],
                     self.practice_done)
 

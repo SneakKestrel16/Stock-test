@@ -104,6 +104,11 @@ conversation where this project started.
   (`test["trail"]`, `test["refill"]`, `test["stops"]` read by `_auto_sell` /
   `_refill`) and `day_replay`. `replay_data()` loads once so variants are fast.
   Tuning results in IDEAS.md ("Day-trade rule tuning").
+  Swing tests (`swing=True`, `SWING_RULES`): `_auto_sell` / `_refill` treat
+  them like day tests minus the end; `update_practice` re-ranks on the first
+  update of each trading day (`ranked_on`) and buys missing top-5 with spare
+  cash. Gotcha: test ids are start timestamps to the second; `start_practice`
+  now suffixes `-2`, `-3` when two start in the same second (they collided).
   Gotcha: `tests/fake_run.py` now switches HOME to a temp folder on import;
   before that, GUI drivers wrote fake picks into the real journal.
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.
