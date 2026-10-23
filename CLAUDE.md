@@ -99,5 +99,9 @@ Original design:
 
 ## Possible later ideas (only if the user asks)
 
+See `IDEAS.md` for the full brainstorm on making picks more consistent
+(pick journal + backtest first, then market conditions, more factors, news).
+
+
 - Run `watch` automatically each morning (Windows Task Scheduler).
 - Package as a single `.exe` with PyInstaller.
