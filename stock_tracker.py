@@ -33,7 +33,9 @@ only show you things that happened since the last time you checked.
 
 import argparse
 import io
+import itertools
 import json
+import random
 import re
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
@@ -772,7 +774,9 @@ def cmd_daily(a):
             ("pick", pick),
             ("watch", lambda: f"report {watch_all()[1]}"),
             ("practice", lambda: f"{len(update_practice())} tests updated"),
-            ("snapshots", lambda: f"{snapshot_checks(top)} rows")):
+            ("snapshots", lambda: f"{snapshot_checks(top)} rows"),
+            ("self-tune", lambda: " | ".join(self_improve(load_state().get("contact"), lambda m: None))
+             if market_hours(date.today()) else "skipped, market closed")):
         try:
             lines.append(f"{label}: {step()}")
         except Exception as e:
@@ -1716,7 +1720,7 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
     day: ends at today's close. With no tickers it buys the top 5 of today's S&P 500
     ranking (`funnel`), and money from
     each stop-loss / take-profit sale goes into the next stock in today's ranking.
-    swing: holds overnight for `days` with SWING_RULES (trailing stop, no take-profit);
+    swing: holds overnight for `days` with active_rules("swing") (self-tuned);
     each sale's money buys the next-ranked stock, and each trading morning the ranking
     is redone and spare cash buys top-5 stocks not held."""
     queue = []
@@ -1741,8 +1745,9 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
     test = {"id": f"{now:%Y%m%d-%H%M%S}", "name": name or ", ".join(tickers),
             "start": f"{now:%Y-%m-%d %H:%M}", "end": f"{end or now + timedelta(days=days):%Y-%m-%d %H:%M}",
             "day": day, "queue": queue, "swing": swing,
-            "trail": (day and DAY_RULES["trail"]) or (swing and SWING_RULES["trail"]),
-            "refill": DAY_RULES["refill"] if day else "next", "ranked_on": f"{now:%Y-%m-%d}",
+            "trail": bool((day or swing) and active_rules("day" if day else "swing")["trail"]),
+            "refill": active_rules("day" if day else "swing")["refill"] if day or swing else "next",
+            "ranked_on": f"{now:%Y-%m-%d}",
             "cash0": cash, "cash": cash, "stop_pct": stop_pct, "take_profit": take_profit,
             "positions": {}, "trades": [], "spy_start": prices[BENCH], "status": "running",
             "history": [], "follow": follow, "switched": f"{now:%Y-%m-%d %H:%M}"}
@@ -1958,22 +1963,60 @@ SWING_RULES = {"stop": 0.05, "atr": None, "trail": True, "tp": None, "refill": "
 FUNNEL_SIZE = 64          # the S&P 500 funnel keeps this many of the day's ranking
 
 
+BARS_DIR = HOME / "bars5m"     # one gzip CSV of 5-minute closes per session, kept for good
+ALT_STRATEGIES = ("value only", "quality only", "growth only", "momentum only",
+                  "yesterday's winners", "yesterday's losers")
+
+
+def _complete(index):
+    """Sessions in a 5-minute index that have both the 09:30 and 15:50 bars."""
+    stamp = index.strftime("%H:%M")
+    return [d for d in sorted(set(index.date)) if {"09:30", "15:50"} <= set(stamp[index.date == d])]
+
+
+def save_bars(contact=None, say=print):
+    """Store the last few days' 5-minute closes (S&P 500 + the 64 list + SPY), so replay
+    history keeps growing past the 60 days Yahoo keeps. Returns sessions added."""
+    BARS_DIR.mkdir(parents=True, exist_ok=True)
+    have = {f.name[:10] for f in BARS_DIR.glob("*.csv.gz")}
+    tickers = set(DEFAULT_TICKERS) | {BENCH}
+    if contact:
+        tickers |= set(sp500_members([pd.Timestamp.today()], contact, say)[f"{pd.Timestamp.today():%Y-%m}"])
+    say(f"Saving 5-minute prices for {len(tickers)} stocks...")
+    bars = yf.download(sorted(tickers), period="5d", interval="5m", auto_adjust=False,
+                       progress=False, threads=True)["Close"]
+    bars.index = bars.index.tz_convert(NY)
+    added = 0
+    for d in _complete(bars.index):
+        if f"{d}" not in have:
+            bars[bars.index.date == d].dropna(axis=1, how="all").to_csv(BARS_DIR / f"{d}.csv.gz")
+            added += 1
+    return added
+
+
+def _stored_bars(d):
+    f = pd.read_csv(BARS_DIR / f"{d}.csv.gz", index_col=0)
+    f.index = pd.to_datetime(f.index, utc=True).tz_convert(NY)
+    return f
+
+
 def replay_data(contact, say=print, universe="list"):
-    """Everything a day-trade replay needs, loaded once: Yahoo's 5-minute bars (last ~60
-    sessions) and, per session, the ranking made from the day before's close (SEC
-    figures filed by then) and each stock's daily swing (14-day ATR as % of price).
+    """Everything a day-trade replay needs, loaded once: 5-minute bars (Yahoo's last ~60
+    sessions plus every session saved by `save_bars`) and, per session, the ranking made
+    from the day before's close (SEC figures filed by then), each stock's daily swing
+    (14-day ATR as % of price), the pool it ranked, and the other strategies' orderings.
     universe "sp500": rank the S&P 500 as it stood that month and keep the top
     FUNNEL_SIZE (the funnel); "list": DEFAULT_TICKERS."""
     if not contact:
         raise ValueError("The replay ranks stocks with old SEC reports. Set your SEC contact "
                          "email first (Settings tab, or: setup --contact you@example.com).")
     weights = parse_weights(None)
-    say("Finding trading days in Yahoo's 5-minute data (it keeps 60 days)...")
+    say("Finding trading days in Yahoo's 5-minute data (it keeps 60 days) and saved ones...")
     spy = yf.download([BENCH], period="60d", interval="5m", progress=False)["Close"]
     spy.index = spy.index.tz_convert(NY)
-    stamp = spy.index.strftime("%H:%M")
-    sessions = [d for d in sorted(set(spy.index.date))
-                if {"09:30", "15:50"} <= set(stamp[spy.index.date == d])]
+    yahoo = _complete(spy.index)
+    stored = sorted(pd.Timestamp(f.name[:10]).date() for f in BARS_DIR.glob("*.csv.gz")) if BARS_DIR.exists() else []
+    sessions = sorted(set(yahoo) | set(stored))
     if not sessions:
         raise ValueError("No complete trading days in Yahoo's 5-minute data.")
     members = None
@@ -1999,21 +2042,34 @@ def replay_data(contact, say=print, universe="list"):
     tr = pd.concat([data["High"] - data["Low"], (data["High"] - close.shift()).abs(),
                     (data["Low"] - close.shift()).abs()]).groupby(level=0).max()
     atr_pct = tr.rolling(14).mean() / close                    # row d uses days up to d only
+    day_ret = adj / adj.shift() - 1
     days = {}
     for d in sessions:
-        prev = adj.index[adj.index < pd.Timestamp(d)][-1]          # last close before today
-        pool = members.get(f"{prev:%Y-%m}", []) if members else tickers
-        ranked = rank_asof(prev, [t for t in pool if t in adj.columns], close, adj, frames, sigs, 10e9, weights)[0]
-        days[d] = {"order": list(ranked.index)[:FUNNEL_SIZE] if members else list(ranked.index),
-                   "top": basket(ranked), "atr": atr_pct.loc[prev].dropna().to_dict()}
-    # 5-minute prices only for stocks a test could touch: the whole list, or each day's funnel
-    need = tickers if not members else sorted({t for v in days.values() for t in v["order"]})
-    say(f"Downloading 5-minute prices for {len(need)} stocks...")
-    bars = yf.download(need + [BENCH], period="60d", interval="5m", auto_adjust=False,
-                       progress=False, threads=True)["Close"]
-    bars.index = bars.index.tz_convert(NY)
+        before = adj.index[adj.index < pd.Timestamp(d)]
+        if len(before) < 260:
+            continue                                           # not enough history to rank
+        prev = before[-1]                                      # last close before today
+        pool = [t for t in (members.get(f"{prev:%Y-%m}", []) if members else tickers) if t in adj.columns]
+        ranked, priced, _ = rank_asof(prev, pool, close, adj, frames, sigs, 10e9, weights)
+        cut = FUNNEL_SIZE if members else None
+        alts = {f"{f} only": list(ranked.sort_values(f, ascending=False).index[:cut])
+                for f in ("value", "quality", "growth", "momentum") if f in ranked}
+        moves = day_ret.loc[prev, priced].dropna().sort_values(ascending=False)
+        alts["yesterday's winners"], alts["yesterday's losers"] = list(moves.index[:64]), list(moves.index[::-1][:64])
+        days[d] = {"order": list(ranked.index)[:cut], "top": basket(ranked), "pool": priced, "alts": alts,
+                   "atr": atr_pct.loc[prev].dropna().to_dict()}
+    sessions = sorted(days)
+    # 5-minute prices for every stock a test or a random basket could touch
+    need = sorted({t for v in days.values() for t in v["pool"]})
+    missing = [d for d in sessions if d not in set(stored)]
+    bars = None
+    if missing:
+        say(f"Downloading 5-minute prices for {len(need)} stocks...")
+        bars = yf.download(need + [BENCH], period="60d", interval="5m", auto_adjust=False,
+                           progress=False, threads=True)["Close"]
+        bars.index = bars.index.tz_convert(NY)
     for d in sessions:
-        day_bars = bars[bars.index.date == d]
+        day_bars = _stored_bars(d) if d in set(stored) else bars[bars.index.date == d]
         # a bar stamped 09:30 closes at 09:35: its close is the 09:35 price, as in the live test
         steps = [(f"{(t + pd.Timedelta(minutes=5)):%H:%M}", {k: float(v) for k, v in row.items() if pd.notna(v)})
                  for t, row in day_bars.iterrows()]
@@ -2022,7 +2078,7 @@ def replay_data(contact, say=print, universe="list"):
 
 
 def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=None, sessions=None,
-               universe="sp500"):
+               universe="sp500", strategy="ours"):
     """Replay day-trade rules on 5-minute bars, with no peeking: each morning's ranking
     uses only the day before's close and SEC figures filed by then; during the day each
     decision sees only finished bars. Money carries over. `sessions` picks the days
@@ -2030,6 +2086,8 @@ def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=
     atr x the stock's daily swing), trail, tp (None = no take-profit), refill
     "next"/"spy"/"none", overnight (keep holdings instead of selling at 15:55).
     universe: "sp500" = the funnel, as live day tests trade; "list" = the 64 stocks.
+    strategy: "ours" (the ranking), one of ALT_STRATEGIES, or "random:<seed>" (5 random
+    stocks from the same pool each morning, the rest in random order as the queue).
     Returns (days_df, trades_df, summary)."""
     r = {**DAY_RULES, **(rules or {})}
     data = data or replay_data(contact, say, universe)
@@ -2040,10 +2098,19 @@ def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=
     for k, d in enumerate(sessions, 1):
         say(f"Trading day {k}/{len(sessions)} ({d})...")
         day = data[d]
-        top = day["top"]
+        if strategy == "ours":
+            top, order = day["top"], day["order"]
+        elif strategy.startswith("random:"):
+            opening = day["steps"][0][1] if day["steps"] else {}
+            avail = [t for t in day["pool"] if t in opening]   # only stocks that traded at the open
+            order = random.Random(f"{strategy}{d}").sample(avail, len(avail))
+            top = order[:5]
+        else:
+            order = day["alts"].get(strategy, [])
+            top = order[:5]
         start_value, n0 = value, len(test["trades"])
         test["stops"] = {t: r["atr"] * a for t, a in day["atr"].items()} if r["atr"] else {}
-        test["queue"] = [t for t in day["order"] if t not in top]
+        test["queue"] = [t for t in order if t not in top]
         spy_in = spy_out = top_in = end_prices = None
         stamped = n0
         for when, prices in day["steps"]:
@@ -2093,6 +2160,129 @@ def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=
     return days_df, trades, summary
 
 
+SELF_FILE = HOME / "self_tune.json"
+FORWARD_DAYS = 10          # a challenger must win this many new sessions before it takes over
+MARGIN = 0.0025            # ...by at least 0.25% of the money (inference: below that is noise)
+MODES = {"day": ("sp500", DAY_RULES), "swing": ("list", SWING_RULES)}
+
+
+def active_rules(mode):
+    """Rules live tests use: the self-tuning champion if there is one, else the defaults."""
+    try:
+        return {**MODES[mode][1], **json.loads(SELF_FILE.read_text())[mode]["champion"]}
+    except (FileNotFoundError, ValueError, KeyError):
+        return dict(MODES[mode][1])
+
+
+def _neighbours(r):
+    """Rule sets one step around `r`: stop x0.67/x1/x1.5, trailing or not, take-profit
+    none/3%/5%, refill spy/next/none. Overnight stays as the mode has it."""
+    out = []
+    for k, tr, tp, rf in itertools.product((0.67, 1, 1.5), (False, True), (None, 0.03, 0.05),
+                                           ("spy", "next", "none")):
+        out.append({**r, "stop": round(r["stop"] * k, 3), "trail": tr, "tp": tp, "refill": rf})
+    return out
+
+
+def compare_strategies(data, sessions, rules, randoms=200):
+    """$10,000 through `sessions` with these rules, for our ranking, each other strategy,
+    SPY and `randoms` random baskets from the same pool. Returns a dict."""
+    run = lambda strat: day_replay(cash=10000, rules=rules, data=data, sessions=sessions,
+                                   say=lambda m: None, strategy=strat)[2]
+    ours = run("ours")
+    rand = sorted(run(f"random:{i}")["end"] for i in range(randoms))
+    return {"ours": ours["end"], "others": {a: run(a)["end"] for a in ALT_STRATEGIES},
+            "spy": 10000 * ours["growth"][f"{BENCH}, held throughout"],
+            "random_median": rand[len(rand) // 2], "random_best": rand[-1], "random_worst": rand[0],
+            "beat_random": sum(x < ours["end"] for x in rand) / len(rand), "days": len(sessions)}
+
+
+def self_improve(contact, say=print):
+    """One round of self-tuning per mode (run after the close). The champion rules are
+    what live tests use. A challenger is the best neighbour of the champion on all
+    replay history; it takes over only after beating the champion on FORWARD_DAYS
+    sessions that came after it was chosen (never seen while choosing). Also compares
+    the champion with other strategies and random baskets. Returns report lines."""
+    added = save_bars(contact, say)
+    try:
+        st = json.loads(SELF_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        st = {"log": []}
+    today, lines = f"{date.today()}", [f"Saved {added} new session(s) of 5-minute prices."]
+    for mode, (universe, base) in MODES.items():
+        m = st.setdefault(mode, {"champion": dict(base)})
+        champ = {**base, **m["champion"]}
+        data = replay_data(contact, say, universe)
+        sessions = sorted(data)
+        end = lambda r, sess: day_replay(cash=10000, rules=r, data=data, sessions=sess, say=lambda x: None)[2]["end"]
+        event = None
+        if m.get("challenger"):
+            new = [d for d in sessions if f"{d}" > m["since"]]
+            if len(new) >= FORWARD_DAYS:
+                c, ch = end(champ, new), end(m["challenger"], new)
+                if ch > c * (1 + MARGIN):
+                    event = f"PROMOTED challenger: ${ch:,.0f} vs champion ${c:,.0f} on {len(new)} new days"
+                    m["champion"], champ = m["challenger"], m["challenger"]
+                else:
+                    event = f"challenger dropped: ${ch:,.0f} vs champion ${c:,.0f} on {len(new)} new days"
+                m.pop("challenger"), m.pop("since")
+            else:
+                lines.append(f"{mode}: challenger on trial, {len(new)}/{FORWARD_DAYS} new days so far.")
+        if not m.get("challenger"):
+            base_end = end(champ, sessions)
+            best_end, best = max(((end(r, sessions), r) for r in _neighbours(champ)), key=lambda x: x[0])
+            if best != champ and best_end > base_end * (1 + MARGIN):
+                m["challenger"], m["since"] = best, f"{sessions[-1]}"
+                event = (event + "; " if event else "") + (f"new challenger {rules_text(best)} "
+                         f"(${best_end:,.0f} vs ${base_end:,.0f} on {len(sessions)} past days); on trial from tomorrow")
+        cmp_ = compare_strategies(data, sessions[-30:], champ)
+        m["report"] = {"date": today, **cmp_}
+        lines.append(f"{mode}: champion {rules_text(champ)}")
+        lines += ["  " + x for x in comparison_lines(cmp_)]
+        if event:
+            lines.append(f"  {event}")
+            st["log"].append({"date": today, "mode": mode, "event": event})
+    st["log"] = st["log"][-200:]
+    st["last_run"] = today
+    write_json(SELF_FILE, st)
+    return lines
+
+
+def self_status_lines():
+    """Plain summary of the self-tuning state for the app."""
+    try:
+        st = json.loads(SELF_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return ["Not run yet. It runs after the close each trading day (automatic daily run, "
+                "or the app open after 4:05 pm New York time), or press Run now."]
+    lines = [f"Last run: {st.get('last_run', '-')}"]
+    for mode in MODES:
+        m = st.get(mode, {})
+        lines.append(f"{mode.title()}: {rules_text(active_rules(mode))}")
+        if m.get("challenger"):
+            lines.append(f"  On trial since {m['since']}: {rules_text(m['challenger'])}")
+        if m.get("report"):
+            lines += ["  " + x for x in comparison_lines(m["report"])]
+    lines += [f"{x['date']} {x['mode']}: {x['event']}" for x in st.get("log", [])[-5:]]
+    return lines
+
+
+def rules_text(r):
+    r = {**DAY_RULES, **r}
+    return (f"{'trailing ' if r['trail'] else ''}{r['stop']:.1%} stop, "
+            f"{'no take-profit' if r['tp'] is None else format(r['tp'], '.0%') + ' take-profit'}, "
+            f"refill {r['refill']}{', holds overnight' if r['overnight'] else ''}")
+
+
+def comparison_lines(c):
+    out = [f"Last {c['days']} days, $10,000: ours {money(c['ours'])}, SPY {money(c['spy'])}, "
+           f"random baskets median {money(c['random_median'])} (best {money(c['random_best'])}, "
+           f"worst {money(c['random_worst'])})."]
+    out.append(f"Ours beat {c['beat_random']:.0%} of random baskets. Other strategies: "
+               + ", ".join(f"{k} {money(v)}" for k, v in sorted(c["others"].items(), key=lambda kv: -kv[1])) + ".")
+    return out
+
+
 def replay_lines(days_df, summary):
     lines = [f"Day-trade replay: {summary['days']} trading days "
              f"({days_df.index[0]} to {days_df.index[-1]}), 5-minute prices, no peeking ahead.",
@@ -2114,11 +2304,20 @@ def replay_lines(days_df, summary):
 
 def cmd_practice(a):
     day, swing = a.action in ("day", "replay"), a.action == "swing"
-    stop = a.stop if a.stop is not None else DAY_RULES["stop"] if day else SWING_RULES["stop"] if swing else 0.15
-    tp = a.take_profit if a.take_profit is not None or not day else DAY_RULES["tp"]
+    mode = "day" if day else "swing" if swing else None
+    stop = a.stop if a.stop is not None else active_rules(mode)["stop"] if mode else 0.15
+    tp = a.take_profit if a.take_profit is not None or not mode else active_rules(mode)["tp"]
+    if a.action == "improve":
+        try:
+            lines = self_improve(load_state().get("contact"), lambda m: print("  " + m, flush=True)
+                                 if "SEC report" not in m else None)
+        except ValueError as e:
+            sys.exit(str(e))
+        print("\n".join(lines))
+        return
     if a.action == "replay":
         try:
-            days_df, trades, summary = day_replay(a.days, a.cash, {"stop": stop, "tp": tp},
+            days_df, trades, summary = day_replay(a.days, a.cash, {**active_rules("day"), "stop": stop, "tp": tp},
                                                   load_state().get("contact"), lambda m: print("  " + m, flush=True))
         except ValueError as e:
             sys.exit(str(e))
@@ -2262,7 +2461,7 @@ def main():
 
     p = sub.add_parser("practice", help="practice trading with pretend money at live prices")
     p.add_argument("action", nargs="?", default="status",
-                   choices=["status", "start", "day", "swing", "replay", "buy", "sell", "end"])
+                   choices=["status", "start", "day", "swing", "replay", "improve", "buy", "sell", "end"])
     p.add_argument("args", nargs="*", help="start: TICKERS | day: [TICKERS] (none = top 5 of today's S&P 500 ranking, "
                    "trades until today's close) | swing: [TICKERS] (holds overnight for --days) | buy/sell: TEST_ID TICKER SHARES | end: TEST_ID")
     p.add_argument("--cash", type=float, default=10000.0, help="pretend starting cash (default 10000)")

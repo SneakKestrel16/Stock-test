@@ -280,3 +280,26 @@ favours the list on train but not on test). The funnel's picks held all day
 beat SPY on the test half while the day rules turned them into a loss: the
 selling rules, not the stocks, are what lose. Funnel picks lean to memory chips
 and oil (MU, SNDK, APA, EOG) on these dates: a sector bet, see the sector warning.
+
+## Self-tuning and strategy comparison (built 2026-10-23)
+
+Champion/challenger: `self_improve()` after each close. Challenger = best of 54
+neighbours of the champion on all saved sessions; promoted only after beating
+the champion by 0.25%+ on 10 later sessions (forward test, never seen while
+chosen). 0.25% and 10 days are judgement calls (inference); more days = fewer
+lucky promotions but slower learning.
+
+First real round, last 30 sessions (Sep 14 - Oct 23), $10,000:
+
+| | Day trade (S&P funnel) | Swing (64 list) |
+|---|---|---|
+| Ours | $9,685 | $10,831 |
+| Random 5-stock baskets: median (worst-best) | $9,928 ($9,059-$10,757) | $10,317 ($9,556-$11,176) |
+| Ours beat this share of random baskets | 22% | 88% |
+| Best other strategy | growth only $10,034 | growth only $11,174 |
+| SPY held throughout | $10,016 | $10,016 |
+
+Day trading is worse than picking at random; swing beats most random baskets
+but "growth only" beat it. The swing rules were chosen on the 30 days before
+this window, so this window is fair for them. Next idea: put "growth only" (and
+the other strategies) on trial as challengers too, judged the same way.

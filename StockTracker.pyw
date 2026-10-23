@@ -245,7 +245,8 @@ class App:
         for name, build in (("Home", self.build_home), ("Stock", self.build_stock), ("Pick", self.build_pick),
                             ("Practice", self.build_practice), ("Watchlist", self.build_watch),
                             ("History", self.build_history), ("Track record", self.build_track),
-                            ("Backtest", self.build_backtest), ("Settings", self.build_settings)):
+                            ("Backtest", self.build_backtest), ("Self-tuning", self.build_selftune),
+                            ("Settings", self.build_settings)):
             self.tabs[name] = ttk.Frame(nb, padding=12)
             build(self.tabs[name])
         self.settings_tab = self.tabs["Settings"]
@@ -261,6 +262,7 @@ class App:
         root.after(400, self.offer_shortcut)
         root.after(700, lambda: self.do_weather(breadth=False))
         root.after(3000, self.prepare_funnel)
+        root.after(20000, self.maybe_self_tune)
 
     def go(self, tab):
         self.nb.select(self.tabs[tab])
@@ -344,6 +346,30 @@ class App:
         lines.append(f"Picks saved in your journal: {picks or 0} runs")
         lines.append("SEC contact email: " + ("set" if s.get("contact") else "not set (Settings)"))
         self.glance.set("\n".join(lines))
+
+    def do_self_tune(self, quiet=False):
+        contact = st.load_state().get("contact")
+        if not contact:
+            if not quiet:
+                messagebox.showinfo("Stock Tracker", "Self-tuning ranks stocks with old SEC reports. "
+                                    "Add your SEC email above first.")
+            return
+        if self.busy:
+            return
+        self.run_bg("Self-tuning: saving prices, testing rules...",
+                    lambda: st.self_improve(contact, self.progress),
+                    lambda lines: self.self_text.set("\n".join(st.self_status_lines())))
+
+    def maybe_self_tune(self):
+        """After the close on a trading day, if today's round hasn't run, run it."""
+        now = st.pd.Timestamp.now(tz=st.NY)
+        try:
+            done = st.json.loads(st.SELF_FILE.read_text()).get("last_run") == f"{now.date()}"
+        except (FileNotFoundError, ValueError):
+            done = False
+        if not done and st.market_hours(now.date()) and f"{now:%H:%M}" >= "16:05":
+            self.do_self_tune(quiet=True)
+        self.root.after(30 * 60 * 1000, self.maybe_self_tune)
 
     def prepare_funnel(self):
         """On a trading day, rank the S&P 500 in the background (~2 min) so a day test
@@ -1071,13 +1097,13 @@ class App:
         self.p_follow_cb.pack(anchor="w", pady=(6, 0))
         self.p_day = tk.BooleanVar()
         ttk.Checkbutton(new, variable=self.p_day, command=self.practice_day_toggle, text=(
-            "Day trade: ends at today's close. With Stocks empty it buys the top 5 of today's S&P 500 ranking; sells a stock "
-            "that falls 2% below its highest price today and puts that money in SPY. Market hours only.")
+            "Day trade: ends at today's close. With Stocks empty it buys the top 5 of today's S&P 500 ranking and "
+            "sells by the self-tuned rules (Self-tuning tab). Market hours only.")
         ).pack(anchor="w", pady=(2, 0))
         self.p_swing = tk.BooleanVar()
         ttk.Checkbutton(new, variable=self.p_swing, command=lambda: self.practice_day_toggle("swing"), text=(
-            "Swing: holds overnight for the Days above. Sells a stock 5% below its highest price since "
-            "buying; that money buys the next-ranked stock. Re-ranks each trading morning.")
+            "Swing: holds overnight for the Days above, sells by the self-tuned rules (Self-tuning tab), "
+            "re-ranks each trading morning.")
         ).pack(anchor="w", pady=(2, 0))
         ttk.Label(new, style="Muted.TLabel", text=(
             "Money is split evenly over the stocks (whole shares). Prices update every 5 minutes "
@@ -1140,8 +1166,10 @@ class App:
         elif self.p_day.get():
             self.p_swing.set(False)
         day, swing = self.p_day.get(), self.p_swing.get()
-        self.p_stop.set("2" if day else "5" if swing else "15")
-        self.p_tp.set("")
+        mode = "day" if day else "swing" if swing else None
+        rules = st.active_rules(mode) if mode else {"stop": 0.15, "tp": None}
+        self.p_stop.set(f"{rules['stop'] * 100:g}")
+        self.p_tp.set(f"{rules['tp'] * 100:g}" if rules["tp"] else "")
         if day or swing:
             self.p_follow.set(False)
         self.p_days_entry.configure(state="disabled" if day else "normal")   # a day test ends today
@@ -1386,6 +1414,21 @@ class App:
             self.status.set(f"Saved {path}")
 
     # --------------------------------------------------------- settings tab
+    def build_selftune(self, f):
+        self.nb.add(f, text="Self-tuning")
+        ttk.Label(f, style="Muted.TLabel", wraplength=1100, justify="left", text=(
+            "After each trading day the app saves the day's 5-minute prices, tries rule changes for "
+            "day and swing practice on all saved days, and puts the best on trial. A rule change only "
+            "takes over after beating the current rules on 10 later days it never saw while being "
+            "chosen. Each run also compares the rules with other strategies and 200 random 5-stock "
+            "baskets from the same stocks. Runs by itself when the app is open after 4:05 pm New York "
+            "time, or with the automatic daily run (Settings).")).pack(anchor="w")
+        ttk.Button(f, text="Run now (a few minutes)", style="Accent.TButton",
+                   command=self.do_self_tune).pack(anchor="w", pady=8)
+        self.self_text = tk.StringVar(value="\n".join(st.self_status_lines()))
+        ttk.Label(f, textvariable=self.self_text, style="Card.TLabel", justify="left",
+                  wraplength=1100).pack(anchor="w", fill="x")
+
     def build_settings(self, f):
         self.nb.add(f, text="Settings")
         box = ttk.LabelFrame(f, text="SEC filings", padding=10)

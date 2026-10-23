@@ -145,6 +145,28 @@ real_screen, st.screen = st.screen, lambda *a, **k: (_ for _ in ()).throw(Assert
 assert st.funnel("a@b.c", None, lambda m: None) == f1 and f1["source"].startswith("S&P 500")
 st.screen = real_screen
 print("ok funnel")
+
+# self-tuning: saves bars, puts a challenger on trial, and only after FORWARD_DAYS
+# later sessions promotes or drops it; compares with random baskets and other strategies
+lines = st.self_improve("a@b.c", lambda m: None)
+assert list(st.BARS_DIR.glob("*.csv.gz")) and st.SELF_FILE.exists()
+tune = st.json.loads(st.SELF_FILE.read_text())
+for mode in st.MODES:
+    rep_ = tune[mode]["report"]
+    assert 0 <= rep_["beat_random"] <= 1 and set(rep_["others"]) == set(st.ALT_STRATEGIES)
+    assert rep_["random_worst"] <= rep_["random_median"] <= rep_["random_best"]
+on_trial = [m for m in st.MODES if tune[m].get("challenger")]
+for m in on_trial:                         # pretend 10+ new sessions have passed since
+    tune[m]["since"] = "2000-01-01"
+st.write_json(st.SELF_FILE, tune)
+st.self_improve("a@b.c", lambda m: None)
+after = st.json.loads(st.SELF_FILE.read_text())
+for m in on_trial:
+    ev = [x["event"] for x in after["log"] if x["mode"] == m][-1]
+    assert ev.startswith(("PROMOTED", "challenger dropped")), ev
+    if ev.startswith("PROMOTED"):
+        assert st.active_rules(m) == {**st.MODES[m][1], **tune[m]["challenger"]}
+print(f"ok self-tune ({len(on_trial)} challenger(s) judged)")
 assert len(rd) == 5 and rt["time"].str[11:].between("09:35", "15:55").all()
 assert abs(10000 * (1 + rd["day_ret"]).prod() - rs["end"]) < 0.01
 last = rt.groupby(rt["time"].str[:10])

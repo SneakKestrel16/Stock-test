@@ -115,6 +115,14 @@ conversation where this project started.
   universe="sp500")` = point-in-time members, top `FUNNEL_SIZE` per day, 5m bars
   only for stocks in some day's funnel; `day_replay` defaults to it. Swing and
   Pick stay on DEFAULT_TICKERS (funnel lost for swing).
+  Self-tuning (2026-10-23): `save_bars` keeps `bars5m/<date>.csv.gz` (~165 KB
+  per session; no pyarrow, so gzip CSV); `replay_data` merges stored sessions with
+  Yahoo's 60 days and adds per-day `pool` + `alts` (ALT_STRATEGIES).
+  `day_replay(strategy=...)`: "ours", an alt, or "random:<seed>" (from stocks with
+  an opening price). `self_improve` keeps `self_tune.json` (champion, challenger,
+  since, report, log); `active_rules(mode)` feeds live day/swing tests, CLI and GUI
+  defaults. Runs from `cmd_daily` and the app (Self-tuning tab; auto after 16:05
+  New York on trading days).
   Gotcha: `tests/fake_run.py` now switches HOME to a temp folder on import;
   before that, GUI drivers wrote fake picks into the real journal.
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.

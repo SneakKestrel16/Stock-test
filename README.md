@@ -43,6 +43,16 @@ use the shortcut. Tabs:
   and trades the top of that ranking; in the replay this beat the fixed
   64-stock list on both halves of the test (IDEAS.md). Swing and Pick still use
   the 64 list.
+- **Self-tuning**: after each trading day the app saves that day's 5-minute
+  prices (so replay history grows past Yahoo's 60 days), tries rule changes
+  near the current day and swing rules, and puts the best on trial. A change
+  only takes over after beating the current rules on 10 later days it never
+  saw while being chosen. Each round also compares the rules with other
+  strategies (value, quality, growth or momentum alone; yesterday's winners or
+  losers) and 200 random 5-stock baskets from the same stocks. It runs when
+  the app is open after 4:05 pm New York time, or with the automatic daily run.
+  First round (2026-10-23, last 30 days): day trading beat only 22% of random
+  baskets; swing beat 88% but "growth only" did better still.
   **Replay result** (30 trading days, 2026-09-14 to 2026-10-23, no peeking
   ahead): $10,000 became $9,553 (-4.5%). Holding the same top 5 all day with
   no auto-sells: -3.7%. SPY over the same hours: -0.6%. The 2% stop-loss fired
@@ -80,6 +90,7 @@ py stock_tracker.py practice start MSFT KO --days 30 --take-profit 0.3
 py stock_tracker.py practice day             # trade today's top 5 until the close (market hours)
 py stock_tracker.py practice replay --days 30  # replay day trading on past 5-minute prices
 py stock_tracker.py practice swing --days 30  # hold the top 5 overnight with a 5% trailing stop
+py stock_tracker.py practice improve         # one self-tuning round (also runs after each close)
 py stock_tracker.py practice                 # update and show practice tests
 py stock_tracker.py history MSFT             # returns, worst drop, chart, CSV
 py stock_tracker.py add MSFT --bought 410.50 --stop 0.15
