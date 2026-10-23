@@ -109,6 +109,12 @@ conversation where this project started.
   update of each trading day (`ranked_on`) and buys missing top-5 with spare
   cash. Gotcha: test ids are start timestamps to the second; `start_practice`
   now suffixes `-2`, `-3` when two start in the same second (they collided).
+  Funnel (2026-10-24): `funnel()` ranks today's S&P 500 with live `screen`
+  (~30 s), caches `funnel.json` per date; day tests with no tickers use its top
+  5 / order. App starts it in a thread at boot on trading days. `replay_data(...,
+  universe="sp500")` = point-in-time members, top `FUNNEL_SIZE` per day, 5m bars
+  only for stocks in some day's funnel; `day_replay` defaults to it. Swing and
+  Pick stay on DEFAULT_TICKERS (funnel lost for swing).
   Gotcha: `tests/fake_run.py` now switches HOME to a temp folder on import;
   before that, GUI drivers wrote fake picks into the real journal.
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.

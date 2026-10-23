@@ -260,6 +260,7 @@ class App:
         root.after(100, self.poll)
         root.after(400, self.offer_shortcut)
         root.after(700, lambda: self.do_weather(breadth=False))
+        root.after(3000, self.prepare_funnel)
 
     def go(self, tab):
         self.nb.select(self.tabs[tab])
@@ -343,6 +344,20 @@ class App:
         lines.append(f"Picks saved in your journal: {picks or 0} runs")
         lines.append("SEC contact email: " + ("set" if s.get("contact") else "not set (Settings)"))
         self.glance.set("\n".join(lines))
+
+    def prepare_funnel(self):
+        """On a trading day, rank the S&P 500 in the background (~2 min) so a day test
+        can start at once. Cached for the day; quiet unless it fails."""
+        contact = st.load_state().get("contact")
+        if not contact or not st.market_hours(st.date.today()):
+            return
+
+        def work():
+            try:
+                st.funnel(contact, None, lambda m: None)
+            except Exception:
+                log_error(traceback.format_exc())
+        threading.Thread(target=work, daemon=True).start()
 
     def update_market_line(self):
         """Open / closed / holiday / early close, from the NYSE calendar; every minute."""
@@ -1056,7 +1071,7 @@ class App:
         self.p_follow_cb.pack(anchor="w", pady=(6, 0))
         self.p_day = tk.BooleanVar()
         ttk.Checkbutton(new, variable=self.p_day, command=self.practice_day_toggle, text=(
-            "Day trade: ends at today's close. With Stocks empty it buys today's top 5; sells a stock "
+            "Day trade: ends at today's close. With Stocks empty it buys the top 5 of today's S&P 500 ranking; sells a stock "
             "that falls 2% below its highest price today and puts that money in SPY. Market hours only.")
         ).pack(anchor="w", pady=(2, 0))
         self.p_swing = tk.BooleanVar()

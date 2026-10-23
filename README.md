@@ -38,7 +38,11 @@ use the shortcut. Tabs:
   the next-ranked stock (SPY once the list runs out, so no cash sits idle),
   and sells everything 5 minutes before the close. It knows the NYSE
   holidays and 1 pm early closes; the Home tab shows whether the market is
-  open now and when it next opens.
+  open now and when it next opens. Day trades pick from the **S&P 500**: the
+  app ranks all 500 once a day in the background (about 30 seconds, cached)
+  and trades the top of that ranking; in the replay this beat the fixed
+  64-stock list on both halves of the test (IDEAS.md). Swing and Pick still use
+  the 64 list.
   **Replay result** (30 trading days, 2026-09-14 to 2026-10-23, no peeking
   ahead): $10,000 became $9,553 (-4.5%). Holding the same top 5 all day with
   no auto-sells: -3.7%. SPY over the same hours: -0.6%. The 2% stop-loss fired

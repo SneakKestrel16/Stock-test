@@ -1108,6 +1108,34 @@ WIKI_UA = {"User-Agent": "StockTracker/1.0 (personal research tool)"}   # no ema
 SP500_FILE = HOME / "sp500_history.json"
 
 
+FUNNEL_FILE = HOME / "funnel.json"
+
+
+def funnel(contact=None, progress=None, say=print):
+    """Today's S&P 500 ranked once and cached for the day: {"date", "order": top
+    FUNNEL_SIZE tickers, "top": the basket}. Day tests trade from it: in the replay
+    (2026-10-24) it beat the fixed 64 list on both the tuning and the unseen 30 days.
+    Without an SEC contact (needed to map the list to today's tickers) it ranks the
+    64 list instead and says so in "source"."""
+    today = f"{date.today()}"
+    try:
+        cache = json.loads(FUNNEL_FILE.read_text())
+        if cache.get("date") == today:
+            return cache
+    except (FileNotFoundError, ValueError):
+        pass
+    if contact:
+        pool = sp500_members([pd.Timestamp.today()], contact, say)[f"{pd.Timestamp.today():%Y-%m}"]
+        source = f"S&P 500 ({len(pool)} stocks)"
+    else:
+        pool, source = DEFAULT_TICKERS, "64-stock list (set an SEC email to use the S&P 500)"
+    say(f"Ranking the {source}...")
+    ranked = screen(pool, parse_weights(None), 10e9, progress)[0]
+    out = {"date": today, "source": source, "order": list(ranked.index[:FUNNEL_SIZE]), "top": basket(ranked)}
+    write_json(FUNNEL_FILE, out)
+    return out
+
+
 def sp500_members(days, contact, say=print):
     """S&P 500 members at each date, from the Wikipedia list as it stood then (its
     page history), so a backtest doesn't only choose among today's winners. Tickers
@@ -1685,17 +1713,21 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
     """Start a test: split `cash` evenly over `tickers`, whole shares, at live prices.
     follow: every 30 days, switch to the then-current top 5 (no tickers = today's top 5).
     That is the backtested strategy, run forward in real time.
-    day: ends at today's close. With no tickers it buys today's top 5, and money from
+    day: ends at today's close. With no tickers it buys the top 5 of today's S&P 500
+    ranking (`funnel`), and money from
     each stop-loss / take-profit sale goes into the next stock in today's ranking.
     swing: holds overnight for `days` with SWING_RULES (trailing stop, no take-profit);
     each sale's money buys the next-ranked stock, and each trading morning the ranking
     is redone and spare cash buys top-5 stocks not held."""
     queue = []
     end = market_close_today() if day else None
-    if (follow or day or swing) and not tickers:
+    if day and not tickers:                       # day tests trade from the S&P 500 funnel
+        f = funnel(load_state().get("contact"), None, lambda m: None)
+        tickers, queue = f["top"], [t for t in f["order"] if t not in f["top"]]
+    elif (follow or swing) and not tickers:
         ranked = screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0]
         tickers = basket(ranked)
-        queue = [t for t in ranked.index if t not in tickers] if day or swing else []
+        queue = [t for t in ranked.index if t not in tickers] if swing else []
         name = name or (f"Day trade {datetime.now():%Y-%m-%d}" if day else
                         f"Swing {datetime.now():%Y-%m-%d}" if swing else "Follow the picks")
     tickers = [t.upper() for t in tickers]
@@ -1923,24 +1955,35 @@ DAY_RULES = {"stop": 0.02, "atr": None, "trail": True, "tp": None, "refill": "sp
 SWING_RULES = {"stop": 0.05, "atr": None, "trail": True, "tp": None, "refill": "next", "overnight": True}
 
 
-def replay_data(contact, say=print):
+FUNNEL_SIZE = 64          # the S&P 500 funnel keeps this many of the day's ranking
+
+
+def replay_data(contact, say=print, universe="list"):
     """Everything a day-trade replay needs, loaded once: Yahoo's 5-minute bars (last ~60
     sessions) and, per session, the ranking made from the day before's close (SEC
-    figures filed by then) and each stock's daily swing (14-day ATR as % of price)."""
+    figures filed by then) and each stock's daily swing (14-day ATR as % of price).
+    universe "sp500": rank the S&P 500 as it stood that month and keep the top
+    FUNNEL_SIZE (the funnel); "list": DEFAULT_TICKERS."""
     if not contact:
         raise ValueError("The replay ranks stocks with old SEC reports. Set your SEC contact "
                          "email first (Settings tab, or: setup --contact you@example.com).")
-    tickers, weights = DEFAULT_TICKERS, parse_weights(None)
-    say("Downloading 5-minute prices (Yahoo keeps 60 days)...")
-    bars = yf.download(tickers + [BENCH], period="60d", interval="5m", auto_adjust=False,
-                       progress=False, threads=True)["Close"]
-    bars.index = bars.index.tz_convert(NY)
-    stamp = bars.index.strftime("%H:%M")
-    sessions = [d for d in sorted(set(bars.index.date))
-                if {"09:30", "15:50"} <= set(stamp[bars.index.date == d])]
+    weights = parse_weights(None)
+    say("Finding trading days in Yahoo's 5-minute data (it keeps 60 days)...")
+    spy = yf.download([BENCH], period="60d", interval="5m", progress=False)["Close"]
+    spy.index = spy.index.tz_convert(NY)
+    stamp = spy.index.strftime("%H:%M")
+    sessions = [d for d in sorted(set(spy.index.date))
+                if {"09:30", "15:50"} <= set(stamp[spy.index.date == d])]
     if not sessions:
         raise ValueError("No complete trading days in Yahoo's 5-minute data.")
-    say("Downloading daily prices for the morning rankings...")
+    members = None
+    if universe == "sp500":
+        months = sorted({pd.Timestamp(d) - pd.offsets.MonthEnd(1) for d in sessions} | {pd.Timestamp(sessions[-1])})
+        members = sp500_members(months, contact, say)
+        tickers = sorted({t for v in members.values() for t in v})
+    else:
+        tickers = DEFAULT_TICKERS
+    say(f"Downloading daily prices for {len(tickers)} stocks...")
     data = naive(yf.download(tickers + [BENCH], start=pd.Timestamp(sessions[0]) - pd.Timedelta(days=500),
                              auto_adjust=False, actions=True, progress=False, threads=True))
     close, adj = data["Close"], data["Adj Close"]
@@ -1959,27 +2002,37 @@ def replay_data(contact, say=print):
     days = {}
     for d in sessions:
         prev = adj.index[adj.index < pd.Timestamp(d)][-1]          # last close before today
-        ranked = rank_asof(prev, tickers, close, adj, frames, sigs, 10e9, weights)[0]
+        pool = members.get(f"{prev:%Y-%m}", []) if members else tickers
+        ranked = rank_asof(prev, [t for t in pool if t in adj.columns], close, adj, frames, sigs, 10e9, weights)[0]
+        days[d] = {"order": list(ranked.index)[:FUNNEL_SIZE] if members else list(ranked.index),
+                   "top": basket(ranked), "atr": atr_pct.loc[prev].dropna().to_dict()}
+    # 5-minute prices only for stocks a test could touch: the whole list, or each day's funnel
+    need = tickers if not members else sorted({t for v in days.values() for t in v["order"]})
+    say(f"Downloading 5-minute prices for {len(need)} stocks...")
+    bars = yf.download(need + [BENCH], period="60d", interval="5m", auto_adjust=False,
+                       progress=False, threads=True)["Close"]
+    bars.index = bars.index.tz_convert(NY)
+    for d in sessions:
         day_bars = bars[bars.index.date == d]
         # a bar stamped 09:30 closes at 09:35: its close is the 09:35 price, as in the live test
         steps = [(f"{(t + pd.Timedelta(minutes=5)):%H:%M}", {k: float(v) for k, v in row.items() if pd.notna(v)})
                  for t, row in day_bars.iterrows()]
-        days[d] = {"order": list(ranked.index), "top": basket(ranked),
-                   "atr": atr_pct.loc[prev].dropna().to_dict(),
-                   "steps": [(w, pr) for w, pr in steps if "09:35" <= w <= "15:55"]}
+        days[d]["steps"] = [(w, pr) for w, pr in steps if "09:35" <= w <= "15:55"]
     return days
 
 
-def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=None, sessions=None):
+def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=None, sessions=None,
+               universe="sp500"):
     """Replay day-trade rules on 5-minute bars, with no peeking: each morning's ranking
     uses only the day before's close and SEC figures filed by then; during the day each
     decision sees only finished bars. Money carries over. `sessions` picks the days
     (default: the last `days`). rules (see DAY_RULES): stop % or atr multiple (stop =
     atr x the stock's daily swing), trail, tp (None = no take-profit), refill
     "next"/"spy"/"none", overnight (keep holdings instead of selling at 15:55).
+    universe: "sp500" = the funnel, as live day tests trade; "list" = the 64 stocks.
     Returns (days_df, trades_df, summary)."""
     r = {**DAY_RULES, **(rules or {})}
-    data = data or replay_data(contact, say)
+    data = data or replay_data(contact, say, universe)
     sessions = sessions or sorted(data)[-days:]
     test = {"cash": cash, "positions": {}, "trades": [], "stop_pct": r["stop"], "take_profit": r["tp"],
             "day": True, "trail": r["trail"], "refill": r["refill"]}
@@ -2075,6 +2128,9 @@ def cmd_practice(a):
             print(f"\nEvery trade saved to {a.csv}")
         return
     try:
+        if a.action == "day" and not a.args:      # say what the slow S&P ranking is doing
+            market_close_today()                   # closed market: say so before ranking 500 stocks
+            funnel(load_state().get("contact"), print_progress)
         if a.action in ("start", "day", "swing"):
             test = start_practice(a.args, a.cash, a.days, stop, tp, follow=a.follow, day=day, swing=swing)
             if day:
@@ -2207,7 +2263,7 @@ def main():
     p = sub.add_parser("practice", help="practice trading with pretend money at live prices")
     p.add_argument("action", nargs="?", default="status",
                    choices=["status", "start", "day", "swing", "replay", "buy", "sell", "end"])
-    p.add_argument("args", nargs="*", help="start: TICKERS | day: [TICKERS] (none = today's top 5, "
+    p.add_argument("args", nargs="*", help="start: TICKERS | day: [TICKERS] (none = top 5 of today's S&P 500 ranking, "
                    "trades until today's close) | swing: [TICKERS] (holds overnight for --days) | buy/sell: TEST_ID TICKER SHARES | end: TEST_ID")
     p.add_argument("--cash", type=float, default=10000.0, help="pretend starting cash (default 10000)")
     p.add_argument("--days", type=int, default=30, help="how long the test runs; replay: trading days back (default 30)")

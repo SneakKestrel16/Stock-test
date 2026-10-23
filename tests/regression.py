@@ -135,6 +135,16 @@ print("ok market calendar")
 st.save_state({**st.load_state(), "contact": "a@b.c"})
 rdata = st.replay_data("a@b.c", say=lambda m: None)
 rd, rt, rs = st.day_replay(5, 10000, None, data=rdata, say=lambda m: None)
+fdata = st.replay_data("a@b.c", say=lambda m: None, universe="sp500")      # fake Wikipedia: 40 members
+assert all(len(v["order"]) <= st.FUNNEL_SIZE and set(v["top"]) <= set(v["order"]) for v in fdata.values())
+
+# live funnel: ranked once a day, then served from the cache
+st.FUNNEL_FILE.unlink(missing_ok=True)
+f1 = st.funnel("a@b.c", None, lambda m: None)
+real_screen, st.screen = st.screen, lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-ranked"))
+assert st.funnel("a@b.c", None, lambda m: None) == f1 and f1["source"].startswith("S&P 500")
+st.screen = real_screen
+print("ok funnel")
 assert len(rd) == 5 and rt["time"].str[11:].between("09:35", "15:55").all()
 assert abs(10000 * (1 + rd["day_ret"]).prod() - rs["end"]) < 0.01
 last = rt.groupby(rt["time"].str[:10])

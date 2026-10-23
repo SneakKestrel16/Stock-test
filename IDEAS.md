@@ -259,3 +259,24 @@ winner's edge is partly luck; its test result is the honest number.
 
 **BUILT 2026-10-23** (`practice swing`, Practice tab). A "swing" practice mode with the best-on-train rules (hold overnight,
 5% trailing stop), tested forward in real time before trusting it.
+
+## S&P 500 funnel vs fixed 64 list (2026-10-24)
+
+Funnel: rank the S&P 500 (members as of that month) from the day before's close,
+keep the top 64, trade from that. Same 60 sessions and split as the rule tuning.
+
+| | Train (Jul 31 - Sep 11) | Test (Sep 14 - Oct 23) |
+|---|---|---|
+| Day trade, fixed 64 list | $9,953 | $9,629 |
+| **Day trade, funnel** | **$10,270** | **$9,685** |
+| Swing, fixed 64 list | $10,781 | $10,831 |
+| Swing, funnel | $10,021 | $9,574 |
+| Top 5 held 9:35-15:55: list / funnel | | $9,629 / $10,206 |
+| SPY held throughout | $10,250 | $10,016 |
+
+Kept for day trade only (won both halves; still loses money on the unseen days).
+Swing stays on the list (lost both; note its rules were tuned on the list, which
+favours the list on train but not on test). The funnel's picks held all day
+beat SPY on the test half while the day rules turned them into a loss: the
+selling rules, not the stocks, are what lose. Funnel picks lean to memory chips
+and oil (MU, SNDK, APA, EOG) on these dates: a sector bet, see the sector warning.
