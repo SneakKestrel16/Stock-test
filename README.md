@@ -22,16 +22,22 @@ use the shortcut. Tabs:
 
 - **Home**: how-to steps, your alerts and practice tests at a glance, and
   "market weather" (market trend, fear gauge, recession and credit warnings).
+- **Stock**: type any US ticker to see its key numbers (P/E, dividend and
+  payout, short interest, insider ownership...), returns next to the S&P 500
+  over the same periods, a price chart, news from Yahoo and the web (Google
+  News), SEC filings and the checklist. Buttons add it to the watchlist or
+  start a practice test.
 - **Pick**: ranks big US companies; the top 5 is the suggested basket. Each
   stock has a **Checklist** (forecast changes, insider buying, earnings date,
   dividend safety, share buybacks, a stop-loss sized to the stock, overlap
-  with your watchlist).
+  with your watchlist) and recent web headlines.
 - **Practice**: try stocks with pretend money at live prices for N days, with
   automatic stop-loss / take-profit and your own buys and sells. When it
   ends you get a results list vs SPY.
 - **Watchlist**, **History**, **Track record** (your past picks vs SPY),
   **Backtest** (the pick replayed over 10 past years) and **Settings** (SEC
-  email, shortcut, and an optional automatic weekday run).
+  email, shortcut, light/dark colours, accent colour, text size, and an
+  optional automatic weekday run).
 
 If something goes wrong, the app shows a message and logs details to
 `~/.stock_tracker/app_error.log`.
@@ -40,6 +46,7 @@ If something goes wrong, the app shows a message and logs details to
 
 ```powershell
 py stock_tracker.py pick --add               # top candidates (+ add #1 to watchlist)
+py stock_tracker.py lookup MSFT              # everything about one stock (numbers, news, filings)
 py stock_tracker.py check MSFT               # extra checklist for one company
 py stock_tracker.py market                   # market weather
 py stock_tracker.py practice start MSFT KO --days 30 --take-profit 0.3
@@ -51,6 +58,7 @@ py stock_tracker.py list
 py stock_tracker.py remove MSFT
 py stock_tracker.py track                    # past picks vs SPY (--all adds runners-up)
 py stock_tracker.py backtest --csv bt.csv    # replay the pick over 10 past years
+py stock_tracker.py backtest --universe sp500  # same, choosing from the S&P 500 as it was then
 py stock_tracker.py daily                    # what the automatic run does
 py stock_tracker.py setup --contact you@example.com   # enables SEC filings
 ```

@@ -28,7 +28,8 @@ conversation where this project started.
 ## What exists
 
 - `stock_tracker.py`: main CLI (single file). Commands: `pick`, `history`,
-  `watch`, `add`, `remove`, `list`, `setup`.
+  `watch`, `add`, `remove`, `list`, `setup`, `track`, `backtest`, `practice`,
+  `market`, `check`, `lookup`, `daily`.
   - Data: `yfinance` (`.info`, `yf.download`, `.history`, `.news`,
     `.upgrades_downgrades`, `.calendar`) and SEC EDGAR
     (`company_tickers.json` → CIK → `data.sec.gov/submissions/CIK##########.json`).
@@ -73,6 +74,15 @@ conversation where this project started.
   App theme: `apply_style()` on ttk clam. Gotcha: Tk font sizes must be ints.
   Offline checks: `tests/regression.py`; screenshots need a driver like
   `tests/fake_gui.py` + PIL ImageGrab.
+- Added 2026-10-23: Stock tab / `lookup` (`stock_detail`, `detail_facts`;
+  SPY same-period returns), `web_news()` (Google News RSS, plain UA,
+  `NEWS_FILLER` drops fund-holding filler), Settings > Look (`THEMES`,
+  `ACCENTS`, `TEXT_SIZES`, saved in state `prefs`, Apply restarts the app),
+  `backtest --universe sp500` (`sp500_members()`: old revisions of Wikipedia's
+  "List of S&P 500 companies", CIK -> today's ticker, cached in
+  `sp500_history.json`), one-year-held note in `position_alerts`.
+  Gotcha: `tests/fake_run.py` now switches HOME to a temp folder on import;
+  before that, GUI drivers wrote fake picks into the real journal.
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.
 - `tests/fake_run.py`: monkeypatches yfinance + requests with fake data so every
   command runs offline. Cloud sandboxes usually can't reach Yahoo or sec.gov,
