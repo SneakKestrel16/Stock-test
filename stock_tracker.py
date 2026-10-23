@@ -719,18 +719,23 @@ def track_record(top_only=True):
 
 
 # XBRL tags in SEC "companyfacts". Several per item because companies renamed
-# them over the years (e.g. SalesRevenueNet became RevenueFromContract... in 2018).
+# them over the years (e.g. SalesRevenueNet became RevenueFromContract... in 2018,
+# MA/CAT moved profit to ProfitLoss). First tag wins when several give the same period.
 FACT_TAGS = {
     "revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"],
-    "net_income": ["NetIncomeLoss"],
-    "equity": ["StockholdersEquity"],
+    "net_income": ["NetIncomeLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "ProfitLoss"],
+    "equity": ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
     "op_cash": ["NetCashProvidedByUsedInOperatingActivities",
                 "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"],
     "capex": ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"],
-    "debt": ["LongTermDebt", "LongTermDebtNoncurrent"],
+    "debt": ["LongTermDebt", "LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations"],
     "shares": ["dei:EntityCommonStockSharesOutstanding",
-               "WeightedAverageNumberOfDilutedSharesOutstanding"],
+               "WeightedAverageNumberOfDilutedSharesOutstanding", "CommonStockSharesOutstanding"],
 }
+# The ticker now points at a new parent company whose SEC history is short, so
+# also read the old filer. Found by hand (SEC "company_tickers.json", 2026-10).
+PREDECESSOR_CIKS = {"XOM": [34088],     # ExxonMobil Holdings Corp (2026) <- Exxon Mobil Corp
+                    "BLK": [1364742]}   # BlackRock, Inc. (2024) <- now "BlackRock Finance, Inc."
 FLOWS = {"revenue", "net_income", "op_cash", "capex"}    # amounts over a period, not a point in time
 
 
@@ -744,21 +749,22 @@ def company_facts(ticker, contact):
         return json.loads(cache.read_text())
     headers = {"User-Agent": f"stock_tracker personal research {contact}"}
     cik = sec_cik(ticker, headers)
-    out = {}
-    if cik is not None:
-        r = requests.get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
+    out = {item: [] for item in FACT_TAGS}
+    for c in ([cik] if cik is not None else []) + PREDECESSOR_CIKS.get(ticker, []):
+        r = requests.get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{c:010d}.json",
                          headers=headers, timeout=60)
-        if r.status_code != 404:
-            r.raise_for_status()
-            facts = r.json().get("facts", {})
-            for item, tags in FACT_TAGS.items():
-                out[item] = []
-                for tag in tags:
-                    ns, _, name = tag.rpartition(":")
-                    for vals in facts.get(ns or "us-gaap", {}).get(name, {}).get("units", {}).values():
-                        out[item] += [[v.get("start"), v["end"], v["val"], v["filed"]]
-                                      for v in vals if str(v.get("form", "")).startswith("10-")]
         time.sleep(0.15)      # SEC allows at most 10 requests a second
+        if r.status_code == 404:
+            continue
+        r.raise_for_status()
+        facts = r.json().get("facts", {})
+        for item, tags in FACT_TAGS.items():
+            for tag in reversed(tags):     # preferred tag last: fact_asof takes the last of equals
+                ns, _, name = tag.rpartition(":")
+                for vals in facts.get(ns or "us-gaap", {}).get(name, {}).get("units", {}).values():
+                    out[item] += [[v.get("start"), v["end"], v["val"], v["filed"]]
+                                  for v in vals if str(v.get("form", "")).startswith("10-")]
+    out = {k: v for k, v in out.items() if v}
     cache.write_text(json.dumps(out))
     return out
 
@@ -778,7 +784,7 @@ def fact_frames(raw, splits=None):
             f = f[(f["end"] - f["start"]).dt.days.between(350, 380)]
         if item == "shares":
             f["val"] = [v * split_days[split_days.index > e].prod() for v, e in zip(f["val"], f["end"])]
-        out[item] = f.sort_values("filed")
+        out[item] = f.sort_values("filed", kind="stable")
     return out
 
 
@@ -816,16 +822,14 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
     close, adj = data["Close"], data["Adj Close"]     # Close: for company value; Adj: for returns
     splits = data["Stock Splits"] if "Stock Splits" in data.columns.get_level_values(0) else None
 
-    frames, skipped = {}, []
+    frames = {}
     for i, t in enumerate(tickers, 1):
         say(f"SEC report history {i}/{len(tickers)} ({t})...")
         try:
             frames[t] = fact_frames(company_facts(t, contact),
                                     splits[t] if splits is not None and t in splits else None)
         except Exception:
-            skipped.append(t)
-        if not frames.get(t):
-            skipped.append(t)
+            frames[t] = {}      # counted below as "couldn't be valued"
 
     mom = adj.shift(21) / adj.shift(252) - 1
     ret6 = adj / adj.shift(126) - 1
@@ -834,7 +838,7 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
     month_ends = month_ends[month_ends >= adj.index[0] + pd.DateOffset(months=13)]
     nan = float("nan")
 
-    rows = []
+    rows, unvalued = [], {}
     for k, (d, d2) in enumerate(zip(month_ends[:-1], month_ends[1:]), 1):
         say(f"Replaying month {k}/{len(month_ends) - 1} ({d:%Y-%m})...")
         feats = []
@@ -846,14 +850,20 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
             feats.append({
                 "ticker": t, "marketCap": mcap,
                 "forwardPE": mcap / ni,       # trailing P/E stands in: old forecasts aren't public
-                "priceToBook": mcap / eq, "fcfYield": (get("op_cash") - get("capex")) / mcap,
+                # ponytail: a missing yearly capex row counts as 0 (overstates free cash a
+                # little); some filers skip it in certain years (e.g. NVDA FY2019).
+                "priceToBook": mcap / eq,
+                "fcfYield": (get("op_cash") - (0 if pd.isna(get("capex")) else get("capex"))) / mcap,
                 "returnOnEquity": ni / eq, "profitMargins": ni / rev,
                 "debtToEquity": get("debt") / eq * 100,
                 "revenueGrowth": rev / get("revenue", 1) - 1,
                 "earningsGrowth": ni / ni0 - 1 if ni0 > 0 else nan,
                 "mom_12_1": mom.at[d, t], "ret_6m": ret6.at[d, t],
                 "last": adj.at[d, t], "ma200": ma200.at[d, t]})
-        df, _ = apply_filters(pd.DataFrame(feats).set_index("ticker"), min_mcap)
+        df = pd.DataFrame(feats).set_index("ticker")
+        for t in df.index[df["marketCap"].isna() | df["forwardPE"].isna()]:
+            unvalued[t] = unvalued.get(t, 0) + 1
+        df, _ = apply_filters(df, min_mcap)
         if len(df):
             df = df.join(score(df, weights)).sort_values("score", ascending=False)
         top = list(df.index[:5])
@@ -874,7 +884,7 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
     info = {"months": len(m), "beat_spy": int((m["pick_ret"] > m["spy_ret"]).sum()),
             "beat_all": int((m["pick_ret"] > m["all_ret"]).sum()),
             "cash": int((m["passed"] == 0).sum()), "start": m.index[0], "end": month_ends[-1],
-            "skipped": sorted(set(skipped))}
+            "unvalued": dict(sorted(unvalued.items(), key=lambda kv: -kv[1]))}
     return m, summary, info
 
 
@@ -914,8 +924,9 @@ def backtest_lines(summary, info):
               f"and the equal mix in {info['beat_all']}."]
     if info["cash"]:
         lines.append(f"No stock passed the filters in {info['cash']} months (held cash).")
-    if info["skipped"]:
-        lines.append(f"No SEC report data for: {', '.join(info['skipped'])} (never picked).")
+    if info["unvalued"]:
+        lines += ["Too little SEC data to value these, so they sat out (months):",
+                  ", ".join(f"{t} ({n})" for t, n in info["unvalued"].items())]
     return lines
 
 

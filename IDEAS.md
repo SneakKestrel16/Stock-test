@@ -21,6 +21,26 @@ Other sources are named but not checked yet.
 Built as `log_picks`, `track_record` and `backtest` in `stock_tracker.py`
 (CLI `track`, `backtest`; app tabs Track record, Backtest). See README.
 
+**First real backtest (run 2026-10-22, Sep 2016 to Oct 2026, $10,000 start):**
+
+| | ended with | yearly avg | worst drop |
+|---|---|---|---|
+| Top pick | $48,502 | +17.0% | -41.0% |
+| Top 5 average | $80,211 | +22.9% | -21.4% |
+| SPY | $41,358 | +15.1% | -23.9% |
+| All 64, equal | $65,448 | +20.5% | -20.3% |
+
+What it says (inference, from one run):
+- The **single top pick is close to a coin toss**: it beat SPY in 54 of 121
+  months, swung from +132% (2017) to -38% (2018), and fixing a few data gaps
+  moved its result from $147,676 to $48,502. Too fragile to trust alone.
+- The **top 5 together** beat both SPY and the equal mix with a smaller worst
+  drop. That points to idea 2 (spreading across several picks, stability).
+- Everything beats SPY partly because the list is today's winners
+  (hindsight). The fair yardstick is "all 64, equal": top 5 beat it by ~2.4
+  points a year, which could still be luck. Running it with different `--years`
+  or weights would show whether that edge holds.
+
 - **Pick journal.** Each time `pick` runs, save the date, ticker, price, score
   and factor scores to `~/.stock_tracker/picks.csv`. A "Track record" tab then
   shows how each past pick did after 1, 3, 6 and 12 months **compared with just

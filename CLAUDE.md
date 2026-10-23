@@ -51,10 +51,17 @@ conversation where this project started.
     counts are multiplied by later splits to match yfinance's split-adjusted
     `Close`; returns use `Adj Close`. Gotcha: never drop picks with no price
     data from the track record (a delisted pick would vanish and flatter it).
-    Status: track checked on real Yahoo data; backtest checked only on fake
-    data (`tests/fake_run.py backtest`), because the real run needs the user's
-    SEC contact email. First real run: check that few tickers are "skipped" and
-    that market caps / P/Es look sane in `--csv` output.
+    Status: both checked on real data 2026-10-22 (SEC contact now set). Real
+    backtest takes ~75 s with an empty cache. SEC data gotchas found on that run:
+    - Ticker can point at a new parent company with ~no history (XOM 2026,
+      BLK 2024): `PREDECESSOR_CIKS` merges the old filer's facts.
+    - Companies switch tags: MA/CAT/AVGO report profit as `ProfitLoss` or
+      `NetIncomeLossAvailableToCommonStockholdersBasic`; GOOGL total shares only
+      via `CommonStockSharesOutstanding` before 2022. First tag in `FACT_TAGS` wins.
+    - Can't value: V (multi-class), BRK-B (shares are Class A equivalents).
+      These "sit out" and are listed in the output (`info["unvalued"]`).
+    Sanity script approach: compare market cap / P/E at a few dates with known
+    values (MSFT 2019 ~$1.0T, GOOGL 2019 ~$750B, NVDA 2019 ~$100B).
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.
 - `tests/fake_run.py`: monkeypatches yfinance + requests with fake data so every
   command runs offline. Cloud sandboxes usually can't reach Yahoo or sec.gov,
