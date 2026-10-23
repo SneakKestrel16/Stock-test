@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+build/
+dist/
+*.spec
+
+# generated output
+*_history.csv
+*_chart.png
+screen_*.csv
+watch_*.md
+
+# personal data lives in ~/.stock_tracker, never in this repo
+.stock_tracker/
+state.json
