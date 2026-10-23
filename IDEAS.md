@@ -188,7 +188,13 @@ Ranked by expected value for effort. Same rule: measure before keeping.
    lot without hindsight but the basket still led; the single top pick is not
    usable. Coverage per month: ~501 members, 461 priced, 453 valued (missing =
    mostly bought out / delisted, Yahoo drops them: some survivorship left).
-   Next: rerun the rejected options (`--every`, `--sector-cap`) on this universe.
+   Rejected options rerun on this list, top 5: `--every 3` $33,948 (worst
+   -36.4%), `--sector-cap 2` $34,483 (-28.4%), `--market-filter` $32,682
+   (-35.1%). All worse than plain monthly, so defaults stay. Warning sign:
+   capping sectors cuts the result from $55k to $34k, so much of the edge
+   came from piling into one sector that happened to win. Inference; the
+   monthly CSV's picks would show which sector. Treat the sector warning on
+   the Pick tab seriously.
    **Hindsight-free stock list.** Use S&P 500 membership as of each backtest
    date (Wikipedia keeps a table of changes; unverified source) so the backtest
    stops choosing among today's winners. Biggest known flaw in the numbers.
