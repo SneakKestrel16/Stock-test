@@ -197,8 +197,31 @@ def get_price_signals(tickers):
     return out
 
 
-def score(df, weights):
+def get_sectors(tickers):
+    """Sector of each ticker (today's, from Yahoo). Cached for 90 days."""
+    cache = HOME / "sectors.json"
+    fresh = cache.exists() and time.time() - cache.stat().st_mtime < 90 * 86400
+    have = json.loads(cache.read_text()) if fresh else {}
+    missing = [t for t in tickers if not have.get(t)]
+    if missing:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for t, info in pool.map(fetch_info, missing):
+                have[t] = info.get("sector") or ""
+        HOME.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(have))
+    return {t: have.get(t, "") for t in tickers}
+
+
+def score(df, weights, sectors=None):
+    """Percentile-rank each metric, average into factor scores, weight into one score.
+    With `sectors` (ticker -> sector), value and quality metrics are ranked against the
+    same sector (a P/E of 30 is cheap for software, dear for oil); sectors with fewer
+    than 3 companies fall back to ranking against everyone."""
     fs = pd.DataFrame(index=df.index)
+    groups = None
+    if sectors is not None:
+        groups = pd.Series(sectors).reindex(df.index).fillna("?")
+        small = groups.map(groups.value_counts()) < 3
     for factor, metrics in FACTORS.items():
         ranks = []
         for col, higher in metrics:
@@ -207,6 +230,8 @@ def score(df, weights):
             s = pd.to_numeric(df[col], errors="coerce")
             bad = (s <= 0) if col in POSITIVE_ONLY else pd.Series(False, index=s.index)
             r = s.where(~bad).rank(pct=True, ascending=higher)
+            if groups is not None and factor in ("value", "quality"):
+                r = s.where(~bad).groupby(groups).rank(pct=True, ascending=higher).where(~small, r)
             r[bad] = 0.0
             ranks.append(r)
         if ranks:
@@ -830,9 +855,11 @@ def fact_asof(f, day, years_back=0):
     return f["val"].iloc[-1] if len(f) else float("nan")
 
 
-def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, progress=None):
+def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, progress=None,
+             sector_neutral=False, market_filter=False):
     """Replay `pick` at every month-end of the past `years`, using only data public
-    at the time, and hold the pick for one month. Returns (monthly_df, summary, info)."""
+    at the time, and hold the pick for one month. Returns (monthly_df, summary, info).
+    market_filter: hold cash for the month when SPY is below its 200-day average."""
     if not contact:
         raise ValueError("The backtest needs old company reports from the SEC. Set your SEC "
                          "contact email first (Settings tab, or: setup --contact you@example.com).")
@@ -855,6 +882,7 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
         except Exception:
             frames[t] = {}      # counted below as "couldn't be valued"
 
+    sectors = get_sectors(tickers) if sector_neutral else None
     mom = adj.shift(21) / adj.shift(252) - 1
     ret6 = adj / adj.shift(126) - 1
     ma200 = adj.rolling(200).mean()
@@ -889,8 +917,10 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
             unvalued[t] = unvalued.get(t, 0) + 1
         df, _ = apply_filters(df, min_mcap)
         if len(df):
-            df = df.join(score(df, weights)).sort_values("score", ascending=False)
+            df = df.join(score(df, weights, sectors)).sort_values("score", ascending=False)
         top = list(df.index[:5])
+        if market_filter and adj.at[d, BENCH] < ma200.at[d, BENCH]:
+            top = []                     # market in a downtrend: sit in cash this month
         fwd = (adj.loc[d2] / adj.loc[d] - 1).fillna(0.0)
         rows.append({"date": d, "pick": top[0] if top else "(cash)", "passed": len(df),
                      "pick_ret": fwd[top[0]] if top else 0.0,
@@ -957,7 +987,8 @@ def backtest_lines(summary, info):
 def cmd_backtest(a):
     try:
         m, summary, info = backtest(years=a.years, min_mcap=a.min_mcap,
-                                    contact=load_state().get("contact"))
+                                    contact=load_state().get("contact"),
+                                    sector_neutral=a.sector, market_filter=a.market_filter)
     except ValueError as e:
         sys.exit(str(e))
     print()
@@ -1043,6 +1074,10 @@ def main():
     p.add_argument("--years", type=int, default=10, help="how many years back (default 10)")
     p.add_argument("--min-mcap", type=float, default=10e9, help="minimum market cap (default 10e9)")
     p.add_argument("--csv", help="also save month-by-month detail to this CSV file")
+    p.add_argument("--sector", action="store_true",
+                   help="rank value/quality within each sector (tested 2026-10: did worse)")
+    p.add_argument("--market-filter", action="store_true",
+                   help="hold cash when SPY is below its 200-day average (tested 2026-10: did worse)")
     p.set_defaults(func=cmd_backtest)
 
     p = sub.add_parser("add", help="add a stock to your watchlist")

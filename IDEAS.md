@@ -54,6 +54,20 @@ What it says (inference, from one run):
   `yf.download`.
 - **Check every new idea below against the journal and backtest** before keeping it.
 
+**Variants tested 2026-10-22** (same period, real data; `backtest --sector`,
+`--market-filter`):
+
+| variant | top pick | top 5 | worst drop (top 5) |
+|---|---|---|---|
+| plain (default) | $48,502 | **$80,211** | -21.4% |
+| rank value/quality within sector | $47,653 | $50,654 | -22.7% |
+| sector + cash when SPY < 200-day | $18,917 | $27,204 | -27.1% |
+
+Both ideas made things worse here, so they stay off (kept as options). The
+market filter hurt most: it sat in cash after drops and missed the rebounds
+(2020, 2022-23). That matches what's commonly reported for simple trend
+filters on monthly data, but this is one test on one list (inference).
+
 ## 2. Make the ranking itself steadier
 
 - **Stability check.** Wiggle the factor weights a little 100 times and count
