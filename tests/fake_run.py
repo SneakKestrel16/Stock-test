@@ -33,6 +33,8 @@ class FakeTicker:
         return pd.DataFrame({"Firm":["Morgan Stanley","UBS"],"ToGrade":["Underweight","Buy"],"FromGrade":["Equal-Weight",""],"Action":["down","init"]},index=i)
     @property
     def calendar(s_): return {"Earnings Date":[date.today()+timedelta(days=12)]}
+    @property
+    def fast_info(s_): return {"last_price": 100*random.uniform(0.8,1.25)}
 def fake_download(tickers, start=None, auto_adjust=True, actions=False, **k):
     n=len(pd.bdate_range(start, pd.Timestamp.today())) if start is not None else 275
     idx=pd.bdate_range(end=pd.Timestamp.today(), periods=n)
@@ -49,6 +51,10 @@ class R:
     def raise_for_status(s_): pass
     def json(s_): return s_.d
 def fake_get(url, headers=None, timeout=None):
+    if "fred.stlouisfed.org" in url:
+        r=R({}); days=pd.date_range(end=pd.Timestamp.today(), periods=200)
+        r.text="observation_date,X\n"+"\n".join(f"{d:%Y-%m-%d},{random.uniform(-0.5,4):.2f}" for d in days)
+        return r
     assert "@" in headers["User-Agent"]
     if "company_tickers" in url:
         return R({str(i):{"cik_str":789019 if t=="MSFT" else 1000+i,"ticker":t,"title":t}

@@ -32,6 +32,7 @@ only show you things that happened since the last time you checked.
 """
 
 import argparse
+import io
 import json
 import sys
 import threading
@@ -41,6 +42,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 try:
+    import numpy as np
     import pandas as pd
     import requests
     import yfinance as yf
@@ -116,15 +118,21 @@ def load_state():
 
 
 def save_state(st):
+    write_json(STATE_FILE, st)
+
+
+def write_json(path, obj):
     HOME.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp = path.with_suffix(".tmp")
     with STATE_LOCK:
-        tmp.write_text(json.dumps(st, indent=2, default=str))
-        tmp.replace(STATE_FILE)        # swap in whole: never a half-written state.json
+        tmp.write_text(json.dumps(obj, indent=2, default=str))
+        tmp.replace(path)              # swap in whole: never a half-written file
 
 
 def money(x):
-    return f"${x:,.2f}" if x is not None and pd.notna(x) else "-"
+    if x is None or pd.isna(x):
+        return "-"
+    return f"-${-x:,.2f}" if x < 0 else f"${x:,.2f}"
 
 
 def pct(x):
@@ -267,7 +275,29 @@ def screen(tickers, weights, min_mcap, progress=print_progress):
     df, report = apply_filters(df, min_mcap)
     if df.empty:
         return df, report
-    return df.join(score(df, weights)).sort_values("score", ascending=False), report
+    df = df.join(score(df, weights)).sort_values("score", ascending=False)
+    return df.join(stability(df, weights)), report
+
+
+BASKET_NOTE = """\
+Spread it out: the top 5 together, split evenly. In the 10-year backtest the
+top 5 grew more and fell less than the single top pick (see Backtest)."""
+
+
+def stability(ranked, weights, runs=200, seed=0):
+    """How settled the ranking is: nudge each factor weight to 50-150% of itself
+    `runs` times and count how often each stock comes out #1 and in the top 5."""
+    rng = np.random.default_rng(seed)
+    factors = [f for f in FACTORS if f in ranked]
+    scores, w = ranked[factors].to_numpy(), np.array([weights[f] for f in factors])
+    top1 = pd.Series(0.0, index=ranked.index)
+    top5 = pd.Series(0.0, index=ranked.index)
+    for _ in range(runs):
+        ww = w * rng.uniform(0.5, 1.5, len(w))
+        order = ranked.index[np.argsort(-(scores @ ww), kind="stable")]
+        top1[order[0]] += 1 / runs
+        top5[order[:5]] += 1 / runs
+    return pd.DataFrame({"stable1": top1, "stable5": top5})
 
 
 def apply_filters(df, min_mcap):
@@ -355,10 +385,13 @@ def cmd_pick(a):
     print(f"    - Suggested stop-loss: {money(stop)} ({a.stop:.0%} below today).")
     print("      Selling there caps your loss; you can never lose more than you invest.")
     print("    - Keep any single stock to a small slice of your savings (many people use <=5%).")
+    print(f"  How settled: #1 in {top['stable1']:.0%} of 200 small changes to the weights "
+          f"(top 5 in {top['stable5']:.0%}).")
 
-    print("\n  Runners-up:")
-    for rt, r in df.iloc[1:6].iterrows():
-        print(f"    {rt:6} {r['name'][:26]:26} score {r['score']:.2f}  price {money(r['price'])}")
+    print("\n  " + BASKET_NOTE.replace("\n", "\n  "))
+    for rt, r in df.iloc[:5].iterrows():
+        print(f"    {rt:6} {r['name'][:26]:26} score {r['score']:.2f}  price {money(r['price']):>10}"
+              f"  top-5 in {r['stable5']:.0%} of variations")
 
     print(f"\n  Next: python stock_tracker.py history {t}")
     print("  A high score means 'looks strong on these measures today', not 'will go up'.")
@@ -1000,6 +1033,417 @@ def cmd_backtest(a):
         print(f"\n  Monthly detail saved to {Path(a.csv).resolve()}")
 
 
+# ------------------------------------------------ market weather / checks -
+# Each check returns (name, result, mood, why); mood is "good", "warn", "bad" or "info".
+
+def fred_last(series_id, months_back=0):
+    """Latest value of a FRED series (no key needed), or the value `months_back` ago."""
+    # Gotcha: FRED stalls (no reply) for some custom User-Agents, so send requests' default.
+    r = requests.get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}", timeout=15)
+    r.raise_for_status()
+    s = pd.read_csv(io.StringIO(r.text), index_col=0, parse_dates=True).iloc[:, 0]
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if months_back:
+        s = s[s.index <= s.index[-1] - pd.DateOffset(months=months_back)]
+    return s.iloc[-1]
+
+
+def market_weather(signals=None):
+    """Signals about the market as a whole. `signals`: get_price_signals() of the stock
+    list, if already downloaded (for breadth). Returns (checks, summary_line)."""
+    out = []
+
+    def safe(fn):
+        try:
+            out.append(fn())
+        except Exception:
+            pass
+
+    def trend():
+        c = naive(yf.download([BENCH, "^VIX"], period="13mo", auto_adjust=True, progress=False)["Close"])
+        last, ma = c[BENCH].dropna().iloc[-1], c[BENCH].dropna().tail(200).mean()
+        vix_now[0] = c["^VIX"].dropna().iloc[-1]
+        return ("Market trend", f"{BENCH} {pct(last / ma - 1)} vs its 200-day average",
+                "good" if last > ma else "bad",
+                "Above = market rising overall. Below = falling; drops tend to bunch together.")
+
+    vix_now = [None]
+
+    def vix():
+        v = vix_now[0]
+        return ("Fear gauge (VIX)", f"{v:.1f}", "good" if v < 20 else "warn" if v < 30 else "bad",
+                "Under 20 calm, 20-30 nervous, over 30 fearful. High = big daily swings.")
+
+    def curve():
+        v = fred_last("T10Y3M")
+        return ("Recession warning (yield curve)", f"{v:+.2f} points", "good" if v > 0 else "bad",
+                "10-year minus 3-month Treasury rate. Below zero has often come before "
+                "recessions, with a long and uneven delay (6-24 months).")
+
+    def credit():
+        v, before = fred_last("BAMLH0A0HYM2"), fred_last("BAMLH0A0HYM2", 3)
+        mood = "bad" if v > 6 else "warn" if v - before > 0.75 else "good"
+        return ("Credit stress", f"{v:.2f}% (3 months ago {before:.2f}%)", mood,
+                "Extra interest risky companies pay to borrow. Rising fast = lenders worried.")
+
+    def breadth():
+        s = signals if signals is not None else get_price_signals(DEFAULT_TICKERS)
+        share = (s["last"] > s["ma200"]).mean()
+        return ("Breadth", f"{share:.0%} of {len(s)} big stocks above their 200-day average",
+                "good" if share > 0.6 else "warn" if share > 0.4 else "bad",
+                "A rise carried by only a few stocks is fragile.")
+
+    for fn in (trend, vix, curve, credit, breadth):
+        safe(fn)
+    bad = sum(c[2] == "bad" for c in out)
+    warn = sum(c[2] == "warn" for c in out)
+    summary = ("Mostly calm." if bad == 0 and warn <= 1 else
+               "Mixed: some warning signs." if bad <= 1 else "Stormy: several warning signs.")
+    summary += (" These describe today; they don't predict. In the backtest, sitting in cash "
+                "when the trend turned down did WORSE (missed rebounds), so use this for "
+                "patience and smaller amounts, not for jumping in and out.")
+    return out, summary
+
+
+def atr_stop(hist, mult=3.0):
+    """Stop-loss sized to the stock's normal daily swing: `mult` x the 14-day average
+    true range below the last close. Returns (stop_price, pct_below)."""
+    h, c = hist.tail(60), hist["Close"].tail(60)
+    tr = pd.concat([h["High"] - h["Low"], (h["High"] - c.shift()).abs(),
+                    (h["Low"] - c.shift()).abs()], axis=1).max(axis=1)
+    stop = c.iloc[-1] - mult * tr.tail(14).mean()
+    return stop, 1 - stop / c.iloc[-1]
+
+
+def company_checks(ticker, watchlist=None):
+    """Extra facts about one company, as a checklist. Context, not part of the score:
+    Yahoo keeps no history of most of these, so they can't be backtested."""
+    t = ticker.upper()
+    tk = yf.Ticker(t)
+    out = []
+
+    def check(fn):
+        try:
+            r = fn()
+            if r:
+                out.append(r)
+        except Exception:
+            pass
+
+    info = {}
+    check(lambda: info.update(tk.info or {}))
+
+    def surprises():
+        e = tk.earnings_history.dropna(subset=["epsActual", "epsEstimate"]).tail(4)
+        beats = int((e["epsActual"] > e["epsEstimate"]).sum())
+        return ("Earnings vs forecasts", f"beat forecasts {beats} of last {len(e)} quarters",
+                "good" if beats >= 3 else "warn" if beats >= 2 else "bad",
+                "Companies that keep beating forecasts tend to be well run (or forecast low).")
+
+    def revisions():
+        r = tk.eps_revisions.loc["0y"]
+        up, down = int(r["upLast30days"]), int(r["downLast30days"])
+        tr = tk.eps_trend.loc["0y"]
+        chg = tr["current"] / tr["90daysAgo"] - 1
+        return ("Profit forecasts", f"{up} analysts raised, {down} cut this year's estimate in 30 days; "
+                f"estimate {pct(chg)} over 90 days", "good" if up > down and chg >= 0 else
+                "bad" if down > up and chg < 0 else "warn",
+                "Rising estimates is one of the better-studied signals.")
+
+    def insiders():
+        it = tk.insider_transactions
+        it = it[pd.to_datetime(it["Start Date"]) >= pd.Timestamp.today() - pd.DateOffset(months=6)]
+        buys = it["Text"].str.contains("Purchase", case=False, na=False).sum()
+        sells = it["Text"].str.contains("Sale", case=False, na=False).sum()
+        return ("Insider trades (6 months)", f"{buys} buys, {sells} sales",
+                "good" if buys else "info",
+                "Executives buying with their own money is telling; selling is common "
+                "(taxes, diversifying) and says less.")
+
+    def analysts():
+        r = tk.recommendations.set_index("period")
+        share = lambda p: (r.loc[p, ["strongBuy", "buy"]].sum() / r.loc[p, ["strongBuy", "buy", "hold",
+                                                                           "sell", "strongSell"]].sum())
+        now, before = share("0m"), share("-3m")
+        return ("Analyst mood", f"{now:.0%} say buy (3 months ago {before:.0%})",
+                "good" if now >= before else "warn", "Direction matters more than level: most "
+                "analysts say buy most of the time.")
+
+    def short():
+        v = info.get("shortPercentOfFloat")
+        if v is None:
+            return None
+        return ("Bets against it (short interest)", f"{v:.1%} of shares",
+                "good" if v < 0.05 else "warn" if v < 0.15 else "bad",
+                "High = many traders expect a fall. Information only; this app never shorts.")
+
+    def earnings_soon():
+        dates = (tk.calendar or {}).get("Earnings Date") or []
+        d = min((pd.Timestamp(x) for x in dates if pd.Timestamp(x) >= pd.Timestamp.today().normalize()),
+                default=None)
+        if d is None:
+            return None
+        days = (d - pd.Timestamp.today().normalize()).days
+        return ("Next earnings report", f"{d:%Y-%m-%d} (in {days} days)", "warn" if days <= 7 else "info",
+                "Prices often jump or drop on that day; buying right before is a gamble.")
+
+    def dividend():
+        pr = info.get("payoutRatio")
+        if not pr:
+            return None
+        return ("Dividend safety", f"pays out {pr:.0%} of profit", "good" if pr < 0.7 else
+                "warn" if pr < 1 else "bad", "Over 100% means paying more than it earns: "
+                "a dividend cut is more likely.")
+
+    def share_count():
+        s = tk.get_shares_full(start=pd.Timestamp.today() - pd.DateOffset(months=13)).dropna()
+        chg = s.iloc[-1] / s.iloc[0] - 1
+        return ("Share count (1 year)", pct(chg), "good" if chg <= 0.005 else
+                "warn" if chg < 0.03 else "bad",
+                "Shrinking = buying back shares (good for owners). Growing = new shares dilute you.")
+
+    def stop():
+        p, frac = atr_stop(tk.history(period="3mo", auto_adjust=True))
+        return ("Stop-loss sized to the stock", f"{money(p)} ({frac:.0%} below)", "info",
+                "3x its normal daily swing (ATR). Calm stocks get tighter stops, jumpy ones "
+                "wider, so ordinary noise doesn't sell you out.")
+
+    def overlap():
+        others = [x for x in (watchlist or []) if x != t]
+        if not others:
+            return None
+        c = yf.download([t] + others, period="1y", auto_adjust=True, progress=False)["Close"]
+        corr = c.pct_change().corr()[t].drop(t).dropna()
+        close = corr[corr > 0.7]
+        return ("Overlap with your watchlist", ", ".join(f"{k} {v:.2f}" for k, v in close.items())
+                or f"low (max {corr.max():.2f})" if len(corr) else "n/a",
+                "warn" if len(close) else "good",
+                "Stocks that move together don't spread your risk. Above 0.7 = move a lot alike.")
+
+    def quality():
+        need = ["forwardPE", "freeCashflow", "returnOnEquity", "profitMargins", "revenueGrowth",
+                "earningsGrowth", "debtToEquity", "marketCap"]
+        missing = [k for k in need if info.get(k) is None]
+        return ("Data completeness", "all key numbers present" if not missing else
+                f"missing: {', '.join(missing)}", "good" if not missing else "warn",
+                "Missing numbers get a middle score, which can flatter or hide a company.")
+
+    for fn in (surprises, revisions, insiders, analysts, short, earnings_soon, dividend,
+               share_count, stop, overlap, quality):
+        check(fn)
+    return out
+
+
+def cmd_market(a):
+    checks, summary = market_weather()
+    print_checks("Market weather", checks, summary)
+
+
+def cmd_check(a):
+    checks = company_checks(a.ticker, list(load_state()["watchlist"]))
+    print_checks(f"Checklist for {a.ticker.upper()}", checks,
+                 "Context only: these aren't in the score (no history to test them on).")
+
+
+def print_checks(title, checks, note):
+    marks = {"good": " ok ", "warn": "WARN", "bad": " !! ", "info": "    "}
+    print(f"{title}\n")
+    for name, result, mood, why in checks:
+        print(f"  [{marks[mood]}] {name}: {result}\n           {why}")
+    print("\n  " + note)
+
+
+# ------------------------------------------------------ practice trading --
+# Pretend money, live prices. Long-only like everything else: buys can't exceed
+# cash (no margin) and sells can't exceed shares owned (no shorting).
+
+PRACTICE_FILE = HOME / "practice.json"
+
+
+def load_practice():
+    with STATE_LOCK:
+        try:
+            return json.loads(PRACTICE_FILE.read_text())
+        except FileNotFoundError:
+            return {"tests": []}
+
+
+def live_prices(tickers):
+    """Latest price per ticker (Yahoo; can be ~15 minutes behind)."""
+    def one(t):
+        try:
+            return t, float(yf.Ticker(t).fast_info["last_price"])
+        except Exception:
+            return t, float("nan")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return dict(pool.map(one, tickers))
+
+
+def _trade(test, t, side, shares, price, reason):
+    pos = test["positions"].get(t, {"shares": 0, "cost": 0.0})
+    if side == "BUY":
+        if shares * price > test["cash"] + 1e-6:
+            raise ValueError(f"Not enough cash: {shares} x {money(price)} = {money(shares * price)}, "
+                             f"cash {money(test['cash'])}. (No borrowing in a cash account.)")
+        pos["cost"] = (pos["cost"] * pos["shares"] + price * shares) / (pos["shares"] + shares)
+        pos["shares"] += shares
+        test["cash"] -= shares * price
+        pnl = None
+    else:
+        if shares > pos["shares"]:
+            raise ValueError(f"You own {pos['shares']} {t}; you can't sell more than that.")
+        pos["shares"] -= shares
+        test["cash"] += shares * price
+        pnl = (price - pos["cost"]) * shares
+    if pos["shares"]:
+        test["positions"][t] = pos
+    else:
+        test["positions"].pop(t, None)
+    test["trades"].append({"time": f"{datetime.now():%Y-%m-%d %H:%M}", "ticker": t, "side": side,
+                           "shares": shares, "price": round(price, 4), "reason": reason,
+                           "pnl": None if pnl is None else round(pnl, 2)})
+
+
+def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=None, name=None):
+    """Start a test: split `cash` evenly over `tickers`, whole shares, at live prices."""
+    tickers = [t.upper() for t in tickers]
+    if not tickers or cash <= 0 or days < 1:
+        raise ValueError("Give at least one ticker, cash above 0 and at least 1 day.")
+    prices = live_prices(tickers + [BENCH])
+    bad = [t for t in tickers if not prices[t] > 0]
+    if bad:
+        raise ValueError(f"No live price for {', '.join(bad)}. Check the ticker symbols.")
+    now = datetime.now()
+    test = {"id": f"{now:%Y%m%d-%H%M%S}", "name": name or ", ".join(tickers),
+            "start": f"{now:%Y-%m-%d %H:%M}", "end": f"{now + timedelta(days=days):%Y-%m-%d %H:%M}",
+            "cash0": cash, "cash": cash, "stop_pct": stop_pct, "take_profit": take_profit,
+            "positions": {}, "trades": [], "spy_start": prices[BENCH], "status": "running",
+            "history": []}
+    each = cash / len(tickers)
+    for t in tickers:
+        shares = int(each // prices[t])
+        if shares:
+            _trade(test, t, "BUY", shares, prices[t], "start")
+    _mark(test, prices)
+    with STATE_LOCK:
+        p = load_practice()
+        p["tests"].append(test)
+        write_json(PRACTICE_FILE, p)
+    return test
+
+
+def _mark(test, prices):
+    value = test["cash"] + sum(pos["shares"] * prices.get(t, pos["cost"])
+                               for t, pos in test["positions"].items())
+    test["value"] = value
+    test["last_prices"] = {t: prices[t] for t in test["positions"] if prices.get(t) == prices.get(t)}
+    test["spy_now"] = prices.get(BENCH, test.get("spy_now", test["spy_start"]))
+    test["history"].append([f"{datetime.now():%Y-%m-%d %H:%M}", round(value, 2),
+                            round(test["cash0"] * test["spy_now"] / test["spy_start"], 2)])
+    test["history"] = test["history"][-2000:]
+
+
+def practice_trade(test_id, ticker, side, shares):
+    """Manual buy or sell at the live price."""
+    if shares < 1 or int(shares) != shares:
+        raise ValueError("Shares must be a whole number, 1 or more.")
+    t = ticker.upper()
+    prices = live_prices([t, BENCH])
+    if not prices[t] > 0:
+        raise ValueError(f"No live price for {t}.")
+    with STATE_LOCK:
+        p = load_practice()
+        test = next(x for x in p["tests"] if x["id"] == test_id)
+        if test["status"] != "running":
+            raise ValueError("That test has ended.")
+        _trade(test, t, side, int(shares), prices[t], "you")
+        _mark(test, prices)
+        write_json(PRACTICE_FILE, p)
+    return test
+
+
+def update_practice(end_now=None):
+    """Refresh running tests: apply stop-loss / take-profit, record value, and end
+    tests whose time is up (or `end_now`, a test id). Returns all tests."""
+    with STATE_LOCK:
+        p = load_practice()
+    running = [x for x in p["tests"] if x["status"] == "running"]
+    if not running:
+        return p["tests"]
+    prices = live_prices(sorted({t for x in running for t in x["positions"]} | {BENCH}))
+    with STATE_LOCK:
+        p = load_practice()                 # re-read: a trade may have happened meanwhile
+        for test in p["tests"]:
+            if test["status"] != "running":
+                continue
+            for t, pos in list(test["positions"].items()):
+                price = prices.get(t)
+                if not price or pd.isna(price):
+                    continue
+                if price <= pos["cost"] * (1 - test["stop_pct"]):
+                    _trade(test, t, "SELL", pos["shares"], price, "stop-loss")
+                elif test.get("take_profit") and price >= pos["cost"] * (1 + test["take_profit"]):
+                    _trade(test, t, "SELL", pos["shares"], price, "take-profit")
+            _mark(test, prices)
+            if test["id"] == end_now or datetime.now() >= datetime.strptime(test["end"], "%Y-%m-%d %H:%M"):
+                for t, pos in list(test["positions"].items()):
+                    if prices.get(t) and not pd.isna(prices[t]):
+                        _trade(test, t, "SELL", pos["shares"], prices[t], "test ended")
+                _mark(test, prices)
+                test["status"] = "ended"
+                test["ended"] = f"{datetime.now():%Y-%m-%d %H:%M}"
+        write_json(PRACTICE_FILE, p)
+    return p["tests"]
+
+
+def practice_lines(test):
+    """Plain-language result summary for one test (works while running too)."""
+    value, spy = test.get("value", test["cash0"]), test.get("spy_now", test["spy_start"])
+    ret, spy_ret = value / test["cash0"] - 1, spy / test["spy_start"] - 1
+    sells = [x for x in test["trades"] if x["side"] == "SELL" and x["pnl"] is not None]
+    wins = [x for x in sells if x["pnl"] > 0]
+    state = "ENDED " + test.get("ended", "") if test["status"] == "ended" else f"running until {test['end']}"
+    lines = [f"{test['name']}  ({test['start']} -> {state})",
+             f"Started with {money(test['cash0'])}; now worth {money(value)} ({pct(ret)}).",
+             f"Same money in {BENCH}: {money(test['cash0'] * (1 + spy_ret))} ({pct(spy_ret)}). "
+             f"{'Ahead' if ret >= spy_ret else 'Behind'} by {pct(abs(ret - spy_ret))[1:]}.",
+             f"Cash {money(test['cash'])}; {len(test['positions'])} stocks held; "
+             f"{len(test['trades'])} trades."]
+    if sells:
+        lines.append(f"Closed sales: {len(wins)} of {len(sells)} made money; realised "
+                     f"{money(sum(x['pnl'] for x in sells))}.")
+        best = max(sells, key=lambda x: x["pnl"])
+        worst = min(sells, key=lambda x: x["pnl"])
+        lines.append(f"Best sale {best['ticker']} {money(best['pnl'])}; worst {worst['ticker']} "
+                     f"{money(worst['pnl'])}.")
+    return lines
+
+
+def cmd_practice(a):
+    try:
+        if a.action == "start":
+            test = start_practice(a.args, a.cash, a.days, a.stop, a.take_profit)
+            print(f"Started practice test {test['id']}.")
+            tests = [test]
+        elif a.action in ("buy", "sell"):
+            test_id, t, n = a.args
+            tests = [practice_trade(test_id, t, a.action.upper(), float(n))]
+        else:
+            tests = update_practice(end_now=a.args[0] if a.action == "end" and a.args else None)
+    except (ValueError, StopIteration) as e:
+        sys.exit(str(e) or "No test with that id.")
+    if not tests:
+        sys.exit("No practice tests yet. Start one:  py stock_tracker.py practice start MSFT KO --days 30")
+    for test in tests:
+        print(f"\n[{test['id']}]")
+        for line in practice_lines(test):
+            print("  " + line)
+        for x in test["trades"][-10:]:
+            print(f"    {x['time']}  {x['side']:4} {x['shares']:>5} {x['ticker']:6} @ {money(x['price']):>10}"
+                  f"  {x['reason']}" + (f"  P/L {money(x['pnl'])}" if x["pnl"] is not None else ""))
+    print("\n  Practice uses pretend money and live prices; real results also include costs and taxes.")
+
+
 # ----------------------------------------------------------- watchlist ----
 
 def cmd_add(a):
@@ -1079,6 +1523,22 @@ def main():
     p.add_argument("--market-filter", action="store_true",
                    help="hold cash when SPY is below its 200-day average (tested 2026-10: did worse)")
     p.set_defaults(func=cmd_backtest)
+
+    sub.add_parser("market", help="market weather: trend, fear, recession and credit signals"
+                   ).set_defaults(func=cmd_market)
+
+    p = sub.add_parser("check", help="extra checklist for one company (forecasts, insiders...)")
+    p.add_argument("ticker")
+    p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("practice", help="practice trading with pretend money at live prices")
+    p.add_argument("action", nargs="?", default="status", choices=["status", "start", "buy", "sell", "end"])
+    p.add_argument("args", nargs="*", help="start: TICKERS | buy/sell: TEST_ID TICKER SHARES | end: TEST_ID")
+    p.add_argument("--cash", type=float, default=10000.0, help="pretend starting cash (default 10000)")
+    p.add_argument("--days", type=int, default=30, help="how long the test runs (default 30)")
+    p.add_argument("--stop", type=float, default=0.15, help="auto-sell this far below cost (default 0.15)")
+    p.add_argument("--take-profit", type=float, help="auto-sell this far above cost, e.g. 0.3")
+    p.set_defaults(func=cmd_practice)
 
     p = sub.add_parser("add", help="add a stock to your watchlist")
     p.add_argument("ticker")

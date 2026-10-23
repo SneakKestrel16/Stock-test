@@ -561,6 +561,181 @@ class App:
         if sel and sel[0] in self.event_urls:
             webbrowser.open(self.event_urls[sel[0]])
 
+    # --------------------------------------------------------- practice tab
+    def build_practice(self, f):
+        self.nb.add(f, text="  Practice  ")
+        new = ttk.LabelFrame(f, text="Start a practice test (pretend money, live prices)", padding=8)
+        new.pack(fill="x")
+        self.p_tickers = tk.StringVar()
+        self.p_cash, self.p_days = tk.StringVar(value="10000"), tk.StringVar(value="30")
+        self.p_stop, self.p_tp = tk.StringVar(value="15"), tk.StringVar(value="")
+        row = ttk.Frame(new)
+        row.pack(fill="x")
+        ttk.Label(row, text="Stocks:").pack(side="left")
+        ttk.Entry(row, textvariable=self.p_tickers, width=28).pack(side="left", padx=(2, 4))
+        ttk.Button(row, text="Use today's top 5", command=self.practice_use_top5).pack(side="left")
+        for label, var, w in (("  Cash $", self.p_cash, 8), ("  Days", self.p_days, 4),
+                              ("  Auto-sell if down %", self.p_stop, 4),
+                              ("  Auto-sell if up % (optional)", self.p_tp, 4)):
+            ttk.Label(row, text=label).pack(side="left")
+            ttk.Entry(row, textvariable=var, width=w).pack(side="left", padx=2)
+        ttk.Button(row, text="Start test", style="Accent.TButton",
+                   command=self.practice_start).pack(side="left", padx=8)
+        ttk.Label(new, foreground="gray", text=(
+            "Money is split evenly over the stocks (whole shares). Prices update every 5 minutes "
+            "while the app is open; you can also buy and sell yourself. Results list appears when it ends.")
+        ).pack(anchor="w", pady=(4, 0))
+
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(8, 4))
+        ttk.Label(bar, text="Test:").pack(side="left")
+        self.p_choice = tk.StringVar()
+        self.p_combo = ttk.Combobox(bar, textvariable=self.p_choice, state="readonly", width=60)
+        self.p_combo.pack(side="left", padx=4)
+        self.p_combo.bind("<<ComboboxSelected>>", lambda e: self.practice_show())
+        ttk.Button(bar, text="Refresh prices", command=self.practice_refresh).pack(side="left")
+        ttk.Button(bar, text="End test now", command=self.practice_end).pack(side="left", padx=4)
+
+        body = ttk.Frame(f)
+        body.pack(fill="both", expand=True)
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=True)
+        self.p_summary = tk.StringVar(value="No practice tests yet. Start one above.")
+        ttk.Label(left, textvariable=self.p_summary, style="Card.TLabel", justify="left",
+                  wraplength=560).pack(anchor="w", pady=(0, 6))
+        cols = ("ticker", "shares", "cost", "price", "value", "gain")
+        self.p_hold = self.make_tree(left, cols, ("Stock", "Shares", "Paid (avg)", "Price now", "Value",
+                                                  "Gain"), (70, 60, 90, 90, 100, 70), height=6)
+        trade = ttk.Frame(left)
+        trade.pack(fill="x", pady=6)
+        self.p_t_ticker, self.p_t_shares = tk.StringVar(), tk.StringVar(value="1")
+        ttk.Label(trade, text="Stock:").pack(side="left")
+        ttk.Entry(trade, textvariable=self.p_t_ticker, width=8).pack(side="left", padx=2)
+        ttk.Label(trade, text="  Shares:").pack(side="left")
+        ttk.Entry(trade, textvariable=self.p_t_shares, width=6).pack(side="left", padx=2)
+        ttk.Button(trade, text="Buy", command=lambda: self.practice_trade("BUY")).pack(side="left", padx=4)
+        ttk.Button(trade, text="Sell", command=lambda: self.practice_trade("SELL")).pack(side="left")
+        cols = ("time", "side", "shares", "ticker", "price", "reason", "pnl")
+        self.p_trades = self.make_tree(left, cols, ("Time", "Buy/Sell", "Shares", "Stock", "Price",
+                                                    "Why", "Profit/loss"), (120, 60, 55, 60, 80, 85, 85))
+        self.p_trades.tag_configure("win", foreground="#15803d")
+        self.p_trades.tag_configure("loss", foreground="#b91c1c")
+
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        self.p_fig = Figure(figsize=(5, 4), dpi=100)
+        self.p_ax = self.p_fig.add_subplot(111)
+        self.p_canvas = FigureCanvasTkAgg(self.p_fig, master=body)
+        self.p_canvas.get_tk_widget().pack(side="left", fill="both", expand=True, padx=(8, 0))
+        self.p_tests = []
+        self.root.after(1500, self.practice_auto)
+
+    def practice_use_top5(self):
+        if self.ranked is None or self.ranked.empty:
+            messagebox.showinfo("Stock Tracker", "Run 'Find best buy candidate' on the Pick tab first.")
+            return
+        self.p_tickers.set(" ".join(self.ranked.index[:5]))
+
+    def practice_start(self):
+        tickers = self.p_tickers.get().replace(",", " ").split()
+        try:
+            cash, days = float(self.p_cash.get()), int(self.p_days.get())
+            stop = float(self.p_stop.get()) / 100
+            tp = float(self.p_tp.get()) / 100 if self.p_tp.get().strip() else None
+            assert tickers and cash > 0 and days >= 1 and 0 < stop < 1 and (tp is None or tp > 0)
+        except (ValueError, AssertionError):
+            messagebox.showwarning("Stock Tracker", "Enter stocks (e.g. MSFT KO), cash, days, and the "
+                                   "auto-sell % (between 1 and 99).")
+            return
+        self.run_bg("Starting practice test at live prices...",
+                    lambda: (st.start_practice(tickers, cash, days, stop, tp), st.update_practice())[1],
+                    self.practice_done)
+
+    def practice_refresh(self, quiet=False):
+        if quiet and self.busy:
+            return
+        self.run_bg("Updating practice prices...", st.update_practice, self.practice_done)
+
+    def practice_auto(self):
+        if any(x["status"] == "running" for x in st.load_practice()["tests"]):
+            self.practice_refresh(quiet=True)
+        self.root.after(5 * 60 * 1000, self.practice_auto)
+
+    def practice_end(self):
+        test = self.practice_selected()
+        if test and test["status"] == "running" and messagebox.askyesno(
+                "Stock Tracker", "End this test now and sell everything at today's prices?"):
+            self.run_bg("Ending test...", lambda: st.update_practice(end_now=test["id"]), self.practice_done)
+
+    def practice_trade(self, side):
+        test = self.practice_selected()
+        if not test:
+            return
+        t = self.p_t_ticker.get().strip().upper()
+        try:
+            n = float(self.p_t_shares.get())
+        except ValueError:
+            n = 0
+        self.run_bg(f"{side.title()}ing {t} at the live price...",
+                    lambda: (st.practice_trade(test["id"], t, side, n), st.load_practice()["tests"])[1],
+                    self.practice_done)
+
+    def practice_selected(self):
+        i = self.p_combo.current()
+        return self.p_tests[i] if 0 <= i < len(self.p_tests) else None
+
+    def practice_done(self, tests):
+        before = {x["id"]: x["status"] for x in self.p_tests}
+        keep = self.practice_selected()
+        self.p_tests = sorted(tests, key=lambda x: (x["status"] != "running", x["id"]), reverse=False)
+        self.p_combo["values"] = [f"{'RUNNING' if x['status'] == 'running' else 'ended'}  {x['name']}  "
+                                  f"(started {x['start']})" for x in self.p_tests]
+        ids = [x["id"] for x in self.p_tests]
+        if self.p_tests:
+            self.p_combo.current(ids.index(keep["id"]) if keep and keep["id"] in ids else 0)
+        self.practice_show()
+        for x in self.p_tests:
+            if before.get(x["id"]) == "running" and x["status"] == "ended":
+                messagebox.showinfo("Practice test ended", "\n".join(st.practice_lines(x)))
+
+    def practice_show(self):
+        test = self.practice_selected()
+        if not test:
+            return
+        self.p_summary.set("\n".join(st.practice_lines(test)))
+        prices = test.get("last_prices", {})
+        rows = []
+        for t, pos in test["positions"].items():
+            p = prices.get(t)
+            gain = p / pos["cost"] - 1 if p else None
+            rows.append(((t, pos["shares"], st.money(pos["cost"]), st.money(p),
+                          st.money(p * pos["shares"]) if p else "-", st.pct(gain)),
+                         ("win",) if (gain or 0) > 0 else ("loss",) if (gain or 0) < 0 else ()))
+        self.fill_tree(self.p_hold, rows)
+        self.p_hold.tag_configure("win", foreground="#15803d")
+        self.p_hold.tag_configure("loss", foreground="#b91c1c")
+        self.fill_tree(self.p_trades, [
+            ((x["time"], x["side"], x["shares"], x["ticker"], st.money(x["price"]), x["reason"],
+              st.money(x["pnl"]) if x["pnl"] is not None else ""),
+             ("win",) if (x["pnl"] or 0) > 0 else ("loss",) if (x["pnl"] or 0) < 0 else ())
+            for x in reversed(test["trades"])])
+        ax = self.p_ax
+        ax.clear()
+        if len(test["history"]) > 1:
+            h = st.pd.DataFrame(test["history"], columns=["time", "value", "spy"])
+            h["time"] = st.pd.to_datetime(h["time"])
+            ax.plot(h["time"], h["value"], color="#2563eb", linewidth=2, label="Your test")
+            ax.plot(h["time"], h["spy"], color="#6b7280", linewidth=1.2, label=f"Same money in {st.BENCH}")
+            ax.legend(fontsize=8)
+            self.p_fig.autofmt_xdate()
+        else:
+            ax.text(0.5, 0.5, "Chart fills in as prices update", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+        ax.set_title("Value over time")
+        ax.grid(alpha=0.3)
+        self.p_fig.tight_layout()
+        self.p_canvas.draw()
+
     # ----------------------------------------------------- track record tab
     def build_track(self, f):
         self.nb.add(f, text="  Track record  ")
