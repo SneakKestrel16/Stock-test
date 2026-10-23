@@ -682,6 +682,13 @@ def position_alerts(t, pos, hist):
             lines.append("!! PRICE IS AT/BELOW YOUR STOP-LOSS. Consider selling to cap the loss.")
         elif gain >= 0.5:
             lines.append("Up 50%+. Consider selling part to lock in gains, or raising your stop.")
+        try:                       # date added to the watchlist stands in for the buy date
+            year = date.fromisoformat(pos["added"]) + timedelta(days=366)
+        except (KeyError, TypeError, ValueError):
+            year = None
+        if year and 0 < (year - date.today()).days <= 45 and gain > 0:
+            lines.append(f"One year held on {year}: in the US, selling a gain after that is usually "
+                         "taxed lower (long-term). Check your own tax rules.")
     long = yf.Ticker(t).history(period="1y")["Close"] if len(c) < 200 else c
     ma200 = long.tail(200).mean() if len(long) else None
     if ma200 and last < ma200:

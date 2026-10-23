@@ -62,6 +62,14 @@ ts = [threading.Thread(target=lambda p=p: [st.add_to_watchlist(f"{p}{i}") for i 
 assert len(st.load_state()["watchlist"]) == 80
 print("ok concurrent adds")
 
+# one-year note only for a gain close to its first anniversary; junk dates ignored
+flat = pd.DataFrame({"Close": [100.0] * 250})
+near = str(pd.Timestamp.today().date() - pd.Timedelta(days=340))
+assert any("One year held" in x for x in st.position_alerts("X", {"bought": 80, "added": near}, flat))
+assert not any("One year" in x for x in st.position_alerts("X", {"bought": 120, "added": near}, flat))
+assert len(st.position_alerts("X", {"bought": 80, "added": "x"}, flat)) == 1
+print("ok holding period")
+
 # GUI: an error in a result callback must not stop later results; a stock added while
 # "Check for updates" runs must survive; removing a stock clears its events
 g = runpy.run_path(str(REPO / "StockTracker.pyw"), run_name="lib")

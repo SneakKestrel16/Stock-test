@@ -195,7 +195,7 @@ Ranked by expected value for effort. Same rule: measure before keeping.
    whether "analysts raising estimates" or "insider buying" picked better stocks.
 6. **BUILT** (Budget box on the Pick tab). **Position-size helper.** "How many shares for $X, staying under 5% of
    savings" on the Pick card.
-7. **Holding-period note.** On the watchlist, show when a position passes one
+7. **BUILT** (watchlist alert in the 45 days before). **Holding-period note.** On the watchlist, show when a position passes one
    year (US long-term capital gains are taxed lower; inference, check local rules).
 8. **Desktop notification** when the daily run finds a stop-loss hit or red flag.
 9. Piotroski F-score from SEC data, then backtest it as a quality factor.
