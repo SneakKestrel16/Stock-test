@@ -35,7 +35,10 @@ use the shortcut. Tabs:
   automatic stop-loss / take-profit and your own buys and sells. When it
   ends you get a results list vs SPY. **Day trade** runs for today only:
   it buys today's top 5, sells any stock at -2% or +3%, moves that money into
-  the next-ranked stock, and sells everything at 3:55 pm New York time.
+  the next-ranked stock (SPY once the list runs out, so no cash sits idle),
+  and sells everything 5 minutes before the close. It knows the NYSE
+  holidays and 1 pm early closes; the Home tab shows whether the market is
+  open now and when it next opens.
 - **Watchlist**, **History**, **Track record** (your past picks vs SPY),
   **Backtest** (the pick replayed over 10 past years) and **Settings** (SEC
   email, shortcut, light/dark colours, accent colour, text size, and an

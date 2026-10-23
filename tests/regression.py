@@ -83,12 +83,36 @@ sells = [x for x in day["trades"] if x["side"] == "SELL"]
 refills = [x for x in day["trades"] if x["reason"] == "next in ranking"]
 assert sells and refills and day["cash"] >= 0
 tr = day["trades"]
-for i, b in enumerate(tr):                 # a refill spends only the sale just before it
-    if b["reason"] == "next in ranking":
-        s = tr[i - 1]
-        assert s["side"] == "SELL" and b["shares"] * b["price"] <= s["shares"] * s["price"] + 1e-6
+for i, b in enumerate(tr):                 # every refill follows the sale that paid for it
+    if b["reason"] in ("next in ranking", "parked in SPY"):
+        assert tr[i - 1]["side"] == "SELL"
+starts = [x for x in tr if x["reason"] == "start"]
+assert day["cash0"] - sum(x["shares"] * x["price"] for x in starts) < min(x["price"] for x in starts)
+st.update_practice(end_now=day["id"])     # a running test would make the GUI check below refresh it
 st.market_close_today, st.screen = real_close, real_screen
 print("ok day test")
+
+# refill: a stock with no price waits its turn instead of being dropped; nothing
+# buyable left -> cash parks in SPY
+t = {"positions": {}, "cash": 1000.0, "trades": [], "queue": ["AAA", "BBB"]}
+st._refill(t, {"AAA": float("nan"), "BBB": 100.0, "SPY": 500.0})
+assert list(t["positions"]) == ["BBB"] and t["queue"] == ["AAA"] and t["cash"] == 0
+t["cash"] = 1000.0
+st._refill(t, {"AAA": float("nan"), "SPY": 500.0})
+assert t["positions"]["SPY"]["shares"] == 2 and t["queue"] == ["AAA"]
+print("ok refill")
+
+# NYSE calendar (2026 dates from NYSE's published schedule)
+from datetime import date as D
+h = st.market_holidays(2026)
+assert h[D(2026, 4, 3)] == "Good Friday" and h[D(2026, 7, 3)] == "Independence Day" and D(2026, 7, 4) not in h
+assert st.market_hours(D(2026, 11, 27))[1] == "13:00" and st.market_hours(D(2026, 12, 24))[1] == "13:00"
+assert st.market_hours(D(2026, 11, 26)) is None and st.market_hours(D(2026, 10, 24)) is None
+assert D(2021, 12, 31) not in st.market_holidays(2021) and D(2022, 1, 1) not in st.market_holidays(2022)
+ny = lambda t: pd.Timestamp(t, tz="America/New_York")
+assert not st.market_status(ny("2026-11-26 11:00"))[0] and "Thanksgiving" in st.market_status(ny("2026-11-26 11:00"))[1]
+assert st.market_status(ny("2026-11-27 12:59"))[0] and not st.market_status(ny("2026-11-27 13:00"))[0]
+print("ok market calendar")
 
 # GUI: an error in a result callback must not stop later results; a stock added while
 # "Check for updates" runs must survive; removing a stock clears its events

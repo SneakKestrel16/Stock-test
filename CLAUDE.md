@@ -87,6 +87,13 @@ conversation where this project started.
   spends each stop / take-profit sale on the next queued stock. CLI
   `practice day` loops via `run_day` (5 min); the app's 5-minute practice
   refresh drives it in the GUI. First real day: $10,000 -> $10,120.67, SPY flat.
+  NYSE calendar: `market_holidays()` / `market_hours()` / `market_status()`
+  (rules, not a feed: unscheduled closures like 2025-01-09 are missed). Home
+  tab shows `market_status()` every minute; `cmd_daily` skips the pick on
+  closed days. Leftover cash: start adds single shares until none fits;
+  `_refill` uses all cash right after each sale (sales and refills interleave,
+  so it's that sale's money plus rounding scraps), leaves unpriced stocks in
+  `queue`, and parks the rest in SPY (exempt from day stops).
   Gotcha: `tests/fake_run.py` now switches HOME to a temp folder on import;
   before that, GUI drivers wrote fake picks into the real journal.
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.

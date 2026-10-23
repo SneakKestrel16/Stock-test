@@ -315,6 +315,10 @@ class App:
 
         right = ttk.LabelFrame(f, text="Market weather (today, not a forecast)", padding=12)
         right.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        self.market_line = tk.StringVar()
+        ttk.Label(right, textvariable=self.market_line, style="Step.TLabel", wraplength=520,
+                  justify="left").pack(anchor="w", pady=(0, 8))
+        self.update_market_line()
         bar = ttk.Frame(right)
         bar.pack(fill="x")
         ttk.Button(bar, text="Refresh", command=lambda: self.do_weather(True)).pack(side="left")
@@ -339,6 +343,11 @@ class App:
         lines.append(f"Picks saved in your journal: {picks or 0} runs")
         lines.append("SEC contact email: " + ("set" if s.get("contact") else "not set (Settings)"))
         self.glance.set("\n".join(lines))
+
+    def update_market_line(self):
+        """Open / closed / holiday / early close, from the NYSE calendar; every minute."""
+        self.market_line.set(st.market_status()[1])
+        self.root.after(60 * 1000, self.update_market_line)
 
     def do_weather(self, breadth=True):
         if self.busy:
@@ -1034,18 +1043,21 @@ class App:
                               ("  Auto-sell if down %", self.p_stop, 4),
                               ("  Auto-sell if up % (optional)", self.p_tp, 4)):
             ttk.Label(row, text=label).pack(side="left")
-            ttk.Entry(row, textvariable=var, width=w).pack(side="left", padx=2)
+            entry = ttk.Entry(row, textvariable=var, width=w)
+            entry.pack(side="left", padx=2)
+            if var is self.p_days:
+                self.p_days_entry = entry
         ttk.Button(row, text="Start test", style="Accent.TButton",
                    command=self.practice_start).pack(side="left", padx=8)
         self.p_follow = tk.BooleanVar()
-        ttk.Checkbutton(new, variable=self.p_follow, text=(
+        self.p_follow_cb = ttk.Checkbutton(new, variable=self.p_follow, text=(
             "Follow the picks: every 30 days switch to the new top 5 (leave Stocks empty to start "
-            "with today's). This is the backtested strategy, tested forward in real time.")
-        ).pack(anchor="w", pady=(6, 0))
+            "with today's). This is the backtested strategy, tested forward in real time."))
+        self.p_follow_cb.pack(anchor="w", pady=(6, 0))
         self.p_day = tk.BooleanVar()
         ttk.Checkbutton(new, variable=self.p_day, command=self.practice_day_toggle, text=(
             "Day trade: ends at today's close. Sells at -2% / +3%; with Stocks empty it buys today's "
-            "top 5 and moves each sale's money into the next-ranked stock. Market hours only.")
+            "top 5 and moves each sale's money into the next-ranked stock (or SPY when none is left). Market hours only.")
         ).pack(anchor="w", pady=(2, 0))
         ttk.Label(new, style="Muted.TLabel", text=(
             "Money is split evenly over the stocks (whole shares). Prices update every 5 minutes "
@@ -1108,6 +1120,9 @@ class App:
         self.p_tp.set("3" if day else "")
         if day:
             self.p_follow.set(False)
+        state = "disabled" if day else "normal"       # a day test ignores both
+        self.p_days_entry.configure(state=state)
+        self.p_follow_cb.configure(state=state)
 
     def practice_start(self):
         tickers = self.p_tickers.get().replace(",", " ").split()

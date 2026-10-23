@@ -761,6 +761,8 @@ def cmd_daily(a):
     top = []
 
     def pick():
+        if not market_hours(date.today()):              # holiday: prices didn't move, don't log a repeat
+            return f"skipped, market closed ({market_holidays(date.today().year).get(date.today(), 'weekend')})"
         df = screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0]
         log_picks(df)
         top.extend(df.index[:5])
@@ -1577,14 +1579,75 @@ def _trade(test, t, side, shares, price, reason):
                            "pnl": None if pnl is None else round(pnl, 2)})
 
 
+NY = "America/New_York"
+
+
+def market_holidays(year):
+    """NYSE full-day closures {date: name}, from NYSE's published rules: a Saturday
+    holiday moves to Friday (except New Year's), a Sunday one to Monday. Unscheduled
+    closures (e.g. a national day of mourning) can't be known ahead."""
+    from dateutil.easter import easter
+
+    def nth(month, weekday, n):                     # n-th weekday of a month; n=-1: last
+        d = date(year, month, 1) if n > 0 else date(year, month + 1, 1) - timedelta(days=7)
+        d += timedelta(days=(weekday - d.weekday()) % 7)
+        return d + timedelta(weeks=n - 1) if n > 0 else d
+
+    def observed(d):
+        return d - timedelta(days=1) if d.weekday() == 5 else d + timedelta(days=1) if d.weekday() == 6 else d
+    h = {nth(1, 0, 3): "Martin Luther King Jr. Day", nth(2, 0, 3): "Presidents' Day",
+         easter(year) - timedelta(days=2): "Good Friday", nth(5, 0, -1): "Memorial Day",
+         observed(date(year, 7, 4)): "Independence Day", nth(9, 0, 1): "Labor Day",
+         nth(11, 3, 4): "Thanksgiving", observed(date(year, 12, 25)): "Christmas"}
+    if date(year, 1, 1).weekday() != 5:             # Saturday New Year's: no Friday holiday
+        h[observed(date(year, 1, 1))] = "New Year's Day"
+    if year >= 2022:
+        h[observed(date(year, 6, 19))] = "Juneteenth"
+    return h
+
+
+def market_hours(d):
+    """(open, close, note) in New York time as 'HH:MM' for date d, or None if the market
+    is closed (weekend or holiday). Early 13:00 closes: day after Thanksgiving, and
+    July 3 / Dec 24 when they fall Monday-Thursday before the holiday."""
+    if d.weekday() >= 5 or d in market_holidays(d.year):
+        return None
+    early = (d == market_holidays_by_name(d.year)["Thanksgiving"] + timedelta(days=1)
+             or (d.month, d.day) in ((7, 3), (12, 24)) and d.weekday() <= 3)
+    return ("09:30", "13:00", "closes early") if early else ("09:30", "16:00", "")
+
+
+def market_holidays_by_name(year):
+    return {name: d for d, name in market_holidays(year).items()}
+
+
+def market_status(now=None):
+    """(open_now, one plain sentence) about the US stock market, for the app's Home tab."""
+    now = now or pd.Timestamp.now(tz=NY)
+    today = now.date()
+    hours = market_hours(today)
+    if hours and hours[0] <= f"{now:%H:%M}" < hours[1]:
+        return True, (f"US market open now, until {hours[1]} New York time"
+                      + (" (early close today)." if hours[2] else "."))
+    why = market_holidays(today.year).get(today) or ("weekend" if today.weekday() >= 5 else "")
+    d = today + timedelta(days=0 if hours and f"{now:%H:%M}" < hours[0] else 1)
+    while not market_hours(d):
+        d += timedelta(days=1)
+    nxt = market_hours(d)
+    when = "today" if d == today else f"{d:%a %b} {d.day}"
+    return False, (f"US market closed{f' ({why})' if why else ''}. Opens {when} at {nxt[0]} New York time"
+                   + (f", closes early at {nxt[1]}." if nxt[2] else "."))
+
+
 def market_close_today():
-    """Local time of today's 15:55 New York (5 minutes before the close), if the market
-    is open now; ValueError otherwise."""
-    now_et = pd.Timestamp.now(tz="America/New_York")
-    open_, close = (now_et.normalize() + pd.Timedelta(hours=h, minutes=m) for h, m in ((9, 30), (15, 55)))
-    # ponytail: weekdays only, no holiday calendar; on a holiday prices just don't move
-    if now_et.weekday() >= 5 or not open_ <= now_et < close:
-        raise ValueError("A day test needs the market open: 9:30 to 15:55 New York time, Monday to Friday.")
+    """Local time 5 minutes before today's close, if the market is open now; ValueError
+    otherwise (with the reason: weekend, holiday, outside hours)."""
+    now_et = pd.Timestamp.now(tz=NY)
+    is_open, text = market_status(now_et)
+    hours = market_hours(now_et.date())
+    close = now_et.normalize() + pd.Timedelta(hours=int(hours[1][:2]), minutes=int(hours[1][3:]) - 5) if hours else None
+    if not is_open or now_et >= close:
+        raise ValueError(f"A day test needs the market open. {text}")
     return datetime.now() + (close - now_et).to_pytimedelta()
 
 
@@ -1621,6 +1684,15 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
         shares = int(each // prices[t])
         if shares:
             _trade(test, t, "BUY", shares, prices[t], "start")
+    # Whole shares leave cash over (3 x $511 of a $2,000 slice): add single shares,
+    # each to the stock furthest below its even slice, while any fits.
+    while True:
+        held = {t: test["positions"].get(t, {}).get("shares", 0) * prices[t] for t in tickers}
+        fits = [t for t in tickers if prices[t] <= test["cash"]]
+        if not fits:
+            break
+        t = min(fits, key=lambda t: held[t])
+        _trade(test, t, "BUY", 1, prices[t], "start")
     _mark(test, prices)
     with STATE_LOCK:
         p = load_practice()
@@ -1677,17 +1749,21 @@ def _switch(test, top, prices):
     test["switched"] = f"{datetime.now():%Y-%m-%d %H:%M}"
 
 
-def _refill(test, money_in, prices):
-    """Day tests: put one sale's money into the next priced stock in today's ranking."""
+def _refill(test, prices):
+    """Day tests, right after a sale: put the cash into the next stock in today's
+    ranking that has a price and isn't held (stocks without a price stay in line for
+    the next round). When none is left, park the cash in SPY so it still moves with
+    the market instead of sitting idle."""
     queue = test.get("queue") or []
-    while queue:
-        t = queue.pop(0)
+    for t in queue:
         p = prices.get(t)
-        if p and p == p and t not in test["positions"]:
-            shares = int(min(money_in, test["cash"]) // p)
-            if shares:
-                _trade(test, t, "BUY", shares, p, "next in ranking")
+        if p and p == p and t not in test["positions"] and test["cash"] >= p:
+            queue.remove(t)
+            _trade(test, t, "BUY", int(test["cash"] // p), p, "next in ranking")
             return
+    p = prices.get(BENCH)
+    if p and p == p and test["cash"] >= p:
+        _trade(test, BENCH, "BUY", int(test["cash"] // p), p, "parked in SPY")
 
 
 def update_practice(end_now=None):
@@ -1712,14 +1788,16 @@ def update_practice(end_now=None):
                 price = prices.get(t)
                 if not price or pd.isna(price):
                     continue
-                n = pos["shares"]
+                if t == BENCH and test.get("day"):
+                    continue                      # parked cash rides SPY until the close
                 if price <= pos["cost"] * (1 - test["stop_pct"]):
-                    _trade(test, t, "SELL", n, price, "stop-loss")
+                    _trade(test, t, "SELL", pos["shares"], price, "stop-loss")
                 elif test.get("take_profit") and price >= pos["cost"] * (1 + test["take_profit"]):
-                    _trade(test, t, "SELL", n, price, "take-profit")
+                    _trade(test, t, "SELL", pos["shares"], price, "take-profit")
                 else:
                     continue
-                _refill(test, n * price, prices)
+                if test.get("day"):
+                    _refill(test, prices)
             if test["id"] in due and top:
                 _switch(test, top, prices)
             _mark(test, prices)
