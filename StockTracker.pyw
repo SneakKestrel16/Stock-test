@@ -117,7 +117,10 @@ class App:
         self.build_pick(ttk.Frame(nb, padding=8))
         self.build_history(ttk.Frame(nb, padding=8))
         self.build_watch(ttk.Frame(nb, padding=8))
-        self.build_settings(ttk.Frame(nb, padding=8))
+        self.build_track(ttk.Frame(nb, padding=8))
+        self.build_backtest(ttk.Frame(nb, padding=8))
+        self.settings_tab = ttk.Frame(nb, padding=8)
+        self.build_settings(self.settings_tab)
 
         bar = ttk.Frame(root, padding=(6, 3))
         bar.pack(fill="x")
@@ -244,6 +247,7 @@ class App:
 
     def pick_done(self, result):
         df, report = result
+        st.log_picks(df)
         self.filters.set("\n".join(f"  {label}: {n}" for label, n in report))
         self.rank_tv.delete(*self.rank_tv.get_children())
         self.ranked = df
@@ -547,6 +551,131 @@ class App:
         sel = self.ev_tv.selection()
         if sel and sel[0] in self.event_urls:
             webbrowser.open(self.event_urls[sel[0]])
+
+    # ----------------------------------------------------- track record tab
+    def build_track(self, f):
+        self.nb.add(f, text="  Track record  ")
+        top = ttk.Frame(f)
+        top.pack(fill="x")
+        ttk.Button(top, text="Refresh", style="Big.TButton", command=self.do_track).pack(side="left")
+        self.track_all = tk.BooleanVar()
+        ttk.Checkbutton(top, text="Include runners-up (top 5 of each run)",
+                        variable=self.track_all).pack(side="left", padx=8)
+        ttk.Label(top, text="Every 'Find best buy candidate' result is saved here automatically.",
+                  foreground="gray").pack(side="left")
+        self.track_sum = tk.StringVar(value=(
+            "Press Refresh to see how your past picks did compared with SPY, a fund that holds the\n"
+            "500 largest US companies. If the picks don't beat SPY over time, the score isn't helping."))
+        ttk.Label(f, textvariable=self.track_sum, style="Card.TLabel",
+                  justify="left").pack(anchor="w", pady=8)
+
+        cols = ("date", "ticker", "rank", "sofar", "spy", "ahead") + tuple(h for h, _ in st.HORIZONS)
+        heads = ("Picked on", "Ticker", "Rank", "Pick so far", "SPY so far", "Ahead by") + tuple(
+            f"Ahead after {h}" for h, _ in st.HORIZONS)
+        tv = self.track_tv = ttk.Treeview(f, columns=cols, show="headings")
+        for c, h in zip(cols, heads):
+            tv.heading(c, text=h)
+            tv.column(c, width=100, anchor="center")
+        tv.tag_configure("good", foreground="#15803d")
+        tv.tag_configure("bad", foreground="#b91c1c")
+        tv.pack(fill="both", expand=True)
+
+    def do_track(self):
+        top_only = not self.track_all.get()
+        self.run_bg("Fetching prices for your past picks...",
+                    lambda: st.track_record(top_only), self.track_done)
+
+    def track_done(self, result):
+        table, summary = result
+        self.track_tv.delete(*self.track_tv.get_children())
+        if table.empty:
+            self.track_sum.set("No picks saved yet. Use the Pick tab now and then; check back in a "
+                               "few weeks.")
+            return
+        self.track_sum.set("\n".join(st.track_lines(summary, table)))
+        for _, r in table.sort_values(["date", "rank"], ascending=[False, True]).iterrows():
+            ahead = r["so far"] - r["SPY so far"]
+            later = [st.pct(r[h] - r[f"SPY {h}"]) if h in r and st.pd.notna(r[h]) else "-"
+                     for h, _ in st.HORIZONS]
+            self.track_tv.insert("", "end", tags=("good" if ahead > 0 else "bad" if ahead < 0 else "",),
+                                 values=(r["date"], r["ticker"], r["rank"], st.pct(r["so far"]),
+                                         st.pct(r["SPY so far"]), st.pct(ahead), *later))
+
+    # --------------------------------------------------------- backtest tab
+    def build_backtest(self, f):
+        self.nb.add(f, text="  Backtest  ")
+        top = ttk.Frame(f)
+        top.pack(fill="x")
+        ttk.Button(top, text="Run backtest", style="Big.TButton",
+                   command=self.do_backtest).pack(side="left")
+        ttk.Label(top, text="   Years back:").pack(side="left")
+        self.bt_years = tk.StringVar(value="10")
+        ttk.Spinbox(top, from_=3, to=15, textvariable=self.bt_years, width=4).pack(side="left")
+        self.bt_csv_btn = ttk.Button(top, text="Save monthly CSV...", command=self.save_bt_csv,
+                                     state="disabled")
+        self.bt_csv_btn.pack(side="left", padx=6)
+        ttk.Label(top, text="First run downloads old SEC reports (a few minutes); later runs reuse them.",
+                  foreground="gray").pack(side="left")
+
+        body = ttk.Frame(f)
+        body.pack(fill="both", expand=True, pady=8)
+        self.bt_text = tk.StringVar(value=(
+            "Replays 'Find best buy candidate' at the end of\nevery month in the past, using only "
+            "facts that\nwere public then, and checks how the pick did\nover the following month.\n\n"
+            + st.BACKTEST_CAVEATS))
+        ttk.Label(body, textvariable=self.bt_text, style="Card.TLabel", justify="left",
+                  anchor="nw", width=82).pack(side="left", fill="y")
+
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        self.bt_fig = Figure(figsize=(6, 4.5), dpi=100)
+        self.bt_ax = self.bt_fig.add_subplot(111)
+        self.bt_canvas = FigureCanvasTkAgg(self.bt_fig, master=body)
+        self.bt_canvas.get_tk_widget().pack(side="left", fill="both", expand=True)
+        self.bt_monthly = None
+
+    def do_backtest(self):
+        contact = st.load_state().get("contact")
+        if not contact:
+            messagebox.showinfo("Stock Tracker", "The backtest reads old company reports from the "
+                                "SEC, which asks for a contact email.\nAdd yours in Settings, "
+                                "then try again.")
+            self.nb.select(self.settings_tab)
+            return
+        try:
+            years = int(self.bt_years.get())
+        except ValueError:
+            years = 10
+        self.run_bg("Starting backtest...",
+                    lambda: st.backtest(years=years, contact=contact, progress=self.progress),
+                    self.backtest_done)
+
+    def backtest_done(self, result):
+        m, summary, info = result
+        self.bt_monthly = m
+        self.bt_text.set("\n".join(st.backtest_lines(summary, info)) + "\n\n" + st.BACKTEST_CAVEATS)
+        ax = self.bt_ax
+        ax.clear()
+        colors = ["#2563eb", "#7c3aed", "#111827", "#9ca3af"]
+        for (name, s), color in zip(summary.items(), colors):
+            ax.plot(m.index, 10000 * (1 + m[s["col"]]).cumprod(), label=name, color=color,
+                    linewidth=2 if color == "#2563eb" else 1.2)
+        ax.set_title("Growth of $10,000 (past results, not a forecast)")
+        ax.set_ylabel("$")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+        self.bt_fig.tight_layout()
+        self.bt_canvas.draw()
+        self.bt_csv_btn.configure(state="normal")
+
+    def save_bt_csv(self):
+        if self.bt_monthly is None:
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile="backtest.csv",
+                                            filetypes=[("CSV (opens in Excel)", "*.csv")])
+        if path:
+            self.bt_monthly.to_csv(path)
+            self.status.set(f"Saved {path}")
 
     # --------------------------------------------------------- settings tab
     def build_settings(self, f):

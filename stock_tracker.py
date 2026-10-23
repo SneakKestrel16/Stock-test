@@ -24,6 +24,8 @@ Commands:
     python stock_tracker.py watch NVDA --all        # everything recent, not just new
     python stock_tracker.py list
     python stock_tracker.py remove MSFT
+    python stock_tracker.py track                   # how past picks did vs the market
+    python stock_tracker.py backtest                # replay the pick over 10 past years
 
 Run `watch` once a day (or schedule it with Task Scheduler / cron) and it will
 only show you things that happened since the last time you checked.
@@ -48,6 +50,9 @@ HOME = Path.home() / ".stock_tracker"
 STATE_FILE = HOME / "state.json"
 CIK_FILE = HOME / "sec_tickers.json"
 REPORTS = HOME / "reports"
+PICKS_FILE = HOME / "picks.csv"
+FACTS_DIR = HOME / "sec_facts"
+BENCH = "SPY"   # S&P 500 index fund: "just buy the whole market"
 
 DEFAULT_TICKERS = [
     "AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "AVGO", "ORCL", "CRM", "ADBE",
@@ -216,8 +221,15 @@ def screen(tickers, weights, min_mcap, progress=print_progress):
     if df.empty:
         raise RuntimeError("No data returned. Check your internet connection.")
     df = df.join(get_price_signals(list(df.index)), how="left")
+    df, report = apply_filters(df, min_mcap)
+    if df.empty:
+        return df, report
+    return df.join(score(df, weights)).sort_values("score", ascending=False), report
 
-    # Safety filters: only steady, profitable, uptrending companies qualify.
+
+def apply_filters(df, min_mcap):
+    """Safety filters: only steady, profitable, uptrending companies qualify.
+    Returns (passing_df, [(label, removed_count)])."""
     num = lambda c: pd.to_numeric(df[c], errors="coerce")
     checks = {
         f"market cap >= ${min_mcap/1e9:.0f}B": num("marketCap").fillna(0) >= min_mcap,
@@ -232,10 +244,20 @@ def screen(tickers, weights, min_mcap, progress=print_progress):
         ok = ok.fillna(False)
         report.append((label, int((keep & ~ok).sum())))
         keep &= ok
-    df = df[keep]
-    if df.empty:
-        return df, report
-    return df.join(score(df, weights)).sort_values("score", ascending=False), report
+    return df[keep], report
+
+
+def log_picks(ranked, top=5):
+    """Append the top `top` of a pick run to the pick journal (picks.csv)."""
+    if ranked.empty:
+        return
+    rows = ranked.head(top).rename_axis("ticker").reset_index()
+    rows = rows[["ticker", "price", "score", "value", "quality", "growth", "momentum"]]
+    rows.insert(0, "rank", range(1, len(rows) + 1))
+    rows.insert(0, "date", f"{datetime.now():%Y-%m-%d %H:%M}")
+    HOME.mkdir(parents=True, exist_ok=True)
+    rows.to_csv(PICKS_FILE, mode="a", header=not PICKS_FILE.exists(), index=False,
+                float_format="%.4f")
 
 
 def add_to_watchlist(t, bought=None, stop=0.15, keep_existing=False):
@@ -265,6 +287,7 @@ def cmd_pick(a):
         print(f"  - {label}: {removed} removed")
     if df.empty:
         sys.exit("No stock passed every filter right now. That itself is a signal to be patient.")
+    log_picks(df)
 
     top = df.iloc[0]
     t = df.index[0]
@@ -295,6 +318,7 @@ def cmd_pick(a):
 
     print(f"\n  Next: python stock_tracker.py history {t}")
     print("  A high score means 'looks strong on these measures today', not 'will go up'.")
+    print("  Saved to your pick journal. See how past picks did: python stock_tracker.py track")
 
     if a.add:
         add_to_watchlist(t, stop=a.stop, keep_existing=True)
@@ -624,6 +648,292 @@ def cmd_watch(a):
     print(f"\nLines marked !! are worth a closer look. Report saved to {out}")
 
 
+# ------------------------------------------------ track record / backtest -
+
+HORIZONS = [("1 mo", 21), ("3 mo", 63), ("6 mo", 126), ("1 yr", 252)]
+
+BACKTEST_CAVEATS = """\
+Read this before trusting the numbers:
+- Hindsight in the stock list: these are today's big, successful companies.
+  Choosing among known winners flatters every line, so compare the pick with
+  "all stocks, equal" (a random choice from the same list) more than with SPY.
+- Simplified data: trailing P/E instead of forecasts, yearly sales and profit
+  figures (up to ~15 months old), no EV/EBITDA, no trading costs or taxes.
+- Past results don't predict future results. A method can beat the market for
+  years and then stop."""
+
+
+def naive(df):
+    """Drop the timezone from a price index so dates compare plainly."""
+    if getattr(df.index, "tz", None) is not None:
+        df.index = df.index.tz_localize(None)
+    return df
+
+
+def track_record(top_only=True):
+    """Each journal pick vs SPY over the same trading days (first run per day counts).
+    Returns (table, summary); summary rows are (horizon, n, avg_pick, avg_spy, n_beat)."""
+    if not PICKS_FILE.exists():
+        return pd.DataFrame(), []
+    p = pd.read_csv(PICKS_FILE)
+    if top_only:
+        p = p[p["rank"] == 1]
+    p["day"] = pd.to_datetime(p["date"]).dt.normalize()
+    p = p.drop_duplicates(["day", "ticker"])
+    if p.empty:
+        return pd.DataFrame(), []
+    tickers = sorted(set(p["ticker"]) - {BENCH}) + [BENCH]
+    close = yf.download(tickers, start=p["day"].min() - pd.Timedelta(days=10),
+                        auto_adjust=True, progress=False)["Close"]
+    close = naive(close).ffill()
+
+    rows = []
+    for _, r in p.iterrows():
+        t = r["ticker"]
+        i0 = close.index.searchsorted(r["day"], side="right") - 1   # last close on/before pick day
+        if i0 < 0 or t not in close or pd.isna(close[t].iloc[i0]):
+            # Keep it visible: silently dropping a pick that got delisted would flatter the record.
+            rows.append({"date": r["day"].date(), "ticker": t, "rank": r["rank"], "score": r["score"],
+                         "days": float("nan"), "so far": float("nan"), "SPY so far": float("nan")})
+            continue
+        ret = lambda col, j: close[col].iloc[j] / close[col].iloc[i0] - 1
+        row = {"date": r["day"].date(), "ticker": t, "rank": r["rank"], "score": r["score"],
+               "days": len(close) - 1 - i0, "so far": ret(t, -1), "SPY so far": ret(BENCH, -1)}
+        for label, n in HORIZONS:
+            if i0 + n < len(close):
+                row[label], row[f"SPY {label}"] = ret(t, i0 + n), ret(BENCH, i0 + n)
+        rows.append(row)
+    table = pd.DataFrame(rows).sort_values(["date", "rank"]).reset_index(drop=True)
+
+    summary = []
+    for label in ["so far"] + [h for h, _ in HORIZONS]:
+        if label not in table:
+            continue
+        d = table.dropna(subset=[label])
+        if label == "so far":
+            d = d[d["days"] > 0]
+        spy = d["SPY so far" if label == "so far" else f"SPY {label}"]
+        if len(d):
+            summary.append((label, len(d), d[label].mean(), spy.mean(), int((d[label] > spy).sum())))
+    return table, summary
+
+
+# XBRL tags in SEC "companyfacts". Several per item because companies renamed
+# them over the years (e.g. SalesRevenueNet became RevenueFromContract... in 2018).
+FACT_TAGS = {
+    "revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"],
+    "net_income": ["NetIncomeLoss"],
+    "equity": ["StockholdersEquity"],
+    "op_cash": ["NetCashProvidedByUsedInOperatingActivities",
+                "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"],
+    "capex": ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"],
+    "debt": ["LongTermDebt", "LongTermDebtNoncurrent"],
+    "shares": ["dei:EntityCommonStockSharesOutstanding",
+               "WeightedAverageNumberOfDilutedSharesOutstanding"],
+}
+FLOWS = {"revenue", "net_income", "op_cash", "capex"}    # amounts over a period, not a point in time
+
+
+def company_facts(ticker, contact):
+    """Reported figures from SEC XBRL, each with the date it was filed, so a
+    backtest only uses what was public at the time. Cached for 30 days.
+    Returns {item: [[start, end, value, filed], ...]}."""
+    FACTS_DIR.mkdir(parents=True, exist_ok=True)
+    cache = FACTS_DIR / f"{ticker}.json"
+    if cache.exists() and time.time() - cache.stat().st_mtime < 30 * 86400:
+        return json.loads(cache.read_text())
+    headers = {"User-Agent": f"stock_tracker personal research {contact}"}
+    cik = sec_cik(ticker, headers)
+    out = {}
+    if cik is not None:
+        r = requests.get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
+                         headers=headers, timeout=60)
+        if r.status_code != 404:
+            r.raise_for_status()
+            facts = r.json().get("facts", {})
+            for item, tags in FACT_TAGS.items():
+                out[item] = []
+                for tag in tags:
+                    ns, _, name = tag.rpartition(":")
+                    for vals in facts.get(ns or "us-gaap", {}).get(name, {}).get("units", {}).values():
+                        out[item] += [[v.get("start"), v["end"], v["val"], v["filed"]]
+                                      for v in vals if str(v.get("form", "")).startswith("10-")]
+        time.sleep(0.15)      # SEC allows at most 10 requests a second
+    cache.write_text(json.dumps(out))
+    return out
+
+
+def fact_frames(raw, splits=None):
+    """One DataFrame per item. Flows keep full-year figures only. Share counts are
+    restated on today's split basis to match yfinance's split-adjusted prices."""
+    split_days = splits[splits > 0] if splits is not None else pd.Series(dtype=float)
+    out = {}
+    for item, rows in raw.items():
+        f = pd.DataFrame(rows, columns=["start", "end", "val", "filed"])
+        if f.empty:
+            continue
+        for c in ("start", "end", "filed"):
+            f[c] = pd.to_datetime(f[c])
+        if item in FLOWS:
+            f = f[(f["end"] - f["start"]).dt.days.between(350, 380)]
+        if item == "shares":
+            f["val"] = [v * split_days[split_days.index > e].prod() for v, e in zip(f["val"], f["end"])]
+        out[item] = f.sort_values("filed")
+    return out
+
+
+def fact_asof(f, day, years_back=0):
+    """Latest figure that had been filed by `day`; years_back=1 gives the one a year before it."""
+    if f is None:
+        return float("nan")
+    f = f[f["filed"] <= day]
+    if f.empty:
+        return float("nan")
+    end = f["end"].max()
+    if (day - end).days > 550:               # company stopped reporting this figure
+        return float("nan")
+    if years_back:
+        end -= pd.DateOffset(years=years_back)
+        f = f[(f["end"] - end).abs() <= pd.Timedelta(days=20)]
+    else:
+        f = f[f["end"] == end]
+    return f["val"].iloc[-1] if len(f) else float("nan")
+
+
+def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, progress=None):
+    """Replay `pick` at every month-end of the past `years`, using only data public
+    at the time, and hold the pick for one month. Returns (monthly_df, summary, info)."""
+    if not contact:
+        raise ValueError("The backtest needs old company reports from the SEC. Set your SEC "
+                         "contact email first (Settings tab, or: setup --contact you@example.com).")
+    tickers = tickers or DEFAULT_TICKERS
+    weights = weights or parse_weights(None)
+    say = progress or (lambda msg: print("  " + msg))
+    say("Downloading price history...")
+    start = pd.Timestamp.today().normalize() - pd.DateOffset(years=years, months=14)
+    data = naive(yf.download(tickers + [BENCH], start=start, auto_adjust=False, actions=True,
+                             progress=False, threads=True))
+    close, adj = data["Close"], data["Adj Close"]     # Close: for company value; Adj: for returns
+    splits = data["Stock Splits"] if "Stock Splits" in data.columns.get_level_values(0) else None
+
+    frames, skipped = {}, []
+    for i, t in enumerate(tickers, 1):
+        say(f"SEC report history {i}/{len(tickers)} ({t})...")
+        try:
+            frames[t] = fact_frames(company_facts(t, contact),
+                                    splits[t] if splits is not None and t in splits else None)
+        except Exception:
+            skipped.append(t)
+        if not frames.get(t):
+            skipped.append(t)
+
+    mom = adj.shift(21) / adj.shift(252) - 1
+    ret6 = adj / adj.shift(126) - 1
+    ma200 = adj.rolling(200).mean()
+    month_ends = adj.groupby(adj.index.to_period("M")).tail(1).index
+    month_ends = month_ends[month_ends >= adj.index[0] + pd.DateOffset(months=13)]
+    nan = float("nan")
+
+    rows = []
+    for k, (d, d2) in enumerate(zip(month_ends[:-1], month_ends[1:]), 1):
+        say(f"Replaying month {k}/{len(month_ends) - 1} ({d:%Y-%m})...")
+        feats = []
+        for t in tickers:
+            fr = frames.get(t, {})
+            get = lambda item, back=0: fact_asof(fr.get(item), d, back)
+            mcap = close.at[d, t] * get("shares")
+            ni, ni0, rev, eq = get("net_income"), get("net_income", 1), get("revenue"), get("equity")
+            feats.append({
+                "ticker": t, "marketCap": mcap,
+                "forwardPE": mcap / ni,       # trailing P/E stands in: old forecasts aren't public
+                "priceToBook": mcap / eq, "fcfYield": (get("op_cash") - get("capex")) / mcap,
+                "returnOnEquity": ni / eq, "profitMargins": ni / rev,
+                "debtToEquity": get("debt") / eq * 100,
+                "revenueGrowth": rev / get("revenue", 1) - 1,
+                "earningsGrowth": ni / ni0 - 1 if ni0 > 0 else nan,
+                "mom_12_1": mom.at[d, t], "ret_6m": ret6.at[d, t],
+                "last": adj.at[d, t], "ma200": ma200.at[d, t]})
+        df, _ = apply_filters(pd.DataFrame(feats).set_index("ticker"), min_mcap)
+        if len(df):
+            df = df.join(score(df, weights)).sort_values("score", ascending=False)
+        top = list(df.index[:5])
+        fwd = (adj.loc[d2] / adj.loc[d] - 1).fillna(0.0)
+        rows.append({"date": d, "pick": top[0] if top else "(cash)", "passed": len(df),
+                     "pick_ret": fwd[top[0]] if top else 0.0,
+                     "top5_ret": fwd[top].mean() if top else 0.0,
+                     "spy_ret": fwd[BENCH], "all_ret": fwd[tickers].mean()})
+    m = pd.DataFrame(rows).set_index("date")
+
+    def perf(r):
+        g = pd.concat([pd.Series([1.0]), (1 + r).cumprod()], ignore_index=True)
+        return {"growth": g.iloc[-1], "cagr": g.iloc[-1] ** (12 / len(r)) - 1,
+                "worst": (g / g.cummax() - 1).min()}
+    lines = [("Top pick", "pick_ret"), ("Top 5 average", "top5_ret"),
+             (f"{BENCH} (whole market)", "spy_ret"), (f"All {len(tickers)} stocks, equal", "all_ret")]
+    summary = {name: {**perf(m[col]), "col": col} for name, col in lines}
+    info = {"months": len(m), "beat_spy": int((m["pick_ret"] > m["spy_ret"]).sum()),
+            "beat_all": int((m["pick_ret"] > m["all_ret"]).sum()),
+            "cash": int((m["passed"] == 0).sum()), "start": m.index[0], "end": month_ends[-1],
+            "skipped": sorted(set(skipped))}
+    return m, summary, info
+
+
+def cmd_track(a):
+    table, summary = track_record(top_only=not a.all)
+    if table.empty:
+        sys.exit("No picks in your journal yet. Each `pick` run is saved; check back in a few weeks.")
+    print(f"Your past {'picks' if a.all else 'top picks'} vs {BENCH} (the whole market) "
+          f"over the same days:\n")
+    print(f"  {'date':10}  {'ticker':6}  {'so far':>8}  {BENCH + ' so far':>11}  ahead by")
+    for _, r in table.iterrows():
+        print(f"  {r['date']}  {r['ticker']:6}  {pct(r['so far']):>8}  {pct(r['SPY so far']):>11}"
+              f"  {pct(r['so far'] - r['SPY so far'])}")
+    print()
+    for line in track_lines(summary, table):
+        print("  " + line)
+
+
+def track_lines(summary, table):
+    lines = [f"{'So far' if label == 'so far' else 'After ' + label}: {n} picks, average "
+             f"{pct(avg)} vs {BENCH} {pct(spy)}; beat {BENCH} {beat} of {n} times"
+             for label, n, avg, spy, beat in summary]
+    missing = sorted(set(table.loc[table["so far"].isna(), "ticker"]))
+    if missing:
+        lines += [f"No price data for {', '.join(missing)} (left out above). Try again later;",
+                  "if it stays missing, the company may have been bought out or delisted."]
+    return lines + ["", "A handful of picks proves little either way; luck dominates until there are dozens."]
+
+
+def backtest_lines(summary, info):
+    lines = [f"Backtest {info['start']:%Y-%m} to {info['end']:%Y-%m}: {info['months']} months,",
+             "pick re-run every month-end and held one month.", "",
+             f"{'':24} {'$10,000 became':>14} {'yearly avg':>10} {'worst drop':>10}"]
+    lines += [f"{name:24} {money(10000 * s['growth']):>14} {pct(s['cagr']):>10} {pct(s['worst']):>10}"
+              for name, s in summary.items()]
+    lines += ["", f"Top pick beat {BENCH} in {info['beat_spy']} of {info['months']} months,",
+              f"and the equal mix in {info['beat_all']}."]
+    if info["cash"]:
+        lines.append(f"No stock passed the filters in {info['cash']} months (held cash).")
+    if info["skipped"]:
+        lines.append(f"No SEC report data for: {', '.join(info['skipped'])} (never picked).")
+    return lines
+
+
+def cmd_backtest(a):
+    try:
+        m, summary, info = backtest(years=a.years, min_mcap=a.min_mcap,
+                                    contact=load_state().get("contact"))
+    except ValueError as e:
+        sys.exit(str(e))
+    print()
+    for line in backtest_lines(summary, info):
+        print("  " + line)
+    print("\n" + BACKTEST_CAVEATS)
+    if a.csv:
+        m.to_csv(a.csv)
+        print(f"\n  Monthly detail saved to {Path(a.csv).resolve()}")
+
+
 # ----------------------------------------------------------- watchlist ----
 
 def cmd_add(a):
@@ -689,6 +999,16 @@ def main():
     p.add_argument("--days", type=int, default=30, help="look-back window (default 30)")
     p.add_argument("--all", action="store_true", help="show everything, not just new items")
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("track", help="how past picks did vs the whole market (SPY)")
+    p.add_argument("--all", action="store_true", help="include runners-up, not just top picks")
+    p.set_defaults(func=cmd_track)
+
+    p = sub.add_parser("backtest", help="replay the pick over past years using old SEC reports")
+    p.add_argument("--years", type=int, default=10, help="how many years back (default 10)")
+    p.add_argument("--min-mcap", type=float, default=10e9, help="minimum market cap (default 10e9)")
+    p.add_argument("--csv", help="also save month-by-month detail to this CSV file")
+    p.set_defaults(func=cmd_backtest)
 
     p = sub.add_parser("add", help="add a stock to your watchlist")
     p.add_argument("ticker")

@@ -33,22 +33,44 @@ class FakeTicker:
         return pd.DataFrame({"Firm":["Morgan Stanley","UBS"],"ToGrade":["Underweight","Buy"],"FromGrade":["Equal-Weight",""],"Action":["down","init"]},index=i)
     @property
     def calendar(s_): return {"Earnings Date":[date.today()+timedelta(days=12)]}
-def fake_download(tickers, **k):
-    cols={t:series(275, random.uniform(-0.001,0.002)).values for t in tickers}
-    idx=pd.bdate_range(end=pd.Timestamp.today(), periods=275)
-    return pd.concat({"Close":pd.DataFrame(cols,index=idx)},axis=1)
+def fake_download(tickers, start=None, auto_adjust=True, actions=False, **k):
+    n=len(pd.bdate_range(start, pd.Timestamp.today())) if start is not None else 275
+    idx=pd.bdate_range(end=pd.Timestamp.today(), periods=n)
+    close=pd.DataFrame({t:series(n, random.uniform(-0.0003,0.0009)).values for t in tickers},index=idx)
+    out={"Close":close}
+    if not auto_adjust: out["Adj Close"]=close*1.0
+    if actions:
+        sp=pd.DataFrame(0.0,index=idx,columns=tickers); sp.iloc[n//2,0]=2.0; out["Stock Splits"]=sp
+    return pd.concat(out,axis=1)
 s.yf.Ticker=FakeTicker; s.yf.download=fake_download
 class R:
+    status_code=200
     def __init__(s_, d): s_.d=d; s_.text=json.dumps(d)
     def raise_for_status(s_): pass
     def json(s_): return s_.d
 def fake_get(url, headers=None, timeout=None):
     assert "@" in headers["User-Agent"]
-    if "company_tickers" in url: return R({"0":{"cik_str":789019,"ticker":"MSFT","title":"Microsoft"}})
+    if "company_tickers" in url:
+        return R({str(i):{"cik_str":789019 if t=="MSFT" else 1000+i,"ticker":t,"title":t}
+                  for i,t in enumerate(s.DEFAULT_TICKERS)})
+    if "companyfacts" in url: return R(fake_facts(int(url.split("CIK")[1][:10])))
     t=str(date.today()-timedelta(days=2))
     return R({"filings":{"recent":{"form":["8-K","4","4","10-Q","8-K"],"filingDate":[t,t,t,t,"2020-01-01"],
       "accessionNumber":["0001-26-1","0001-26-2","0001-26-3","0001-26-4","x"],"primaryDocument":["a.htm"]*5,
       "items":["5.02,9.01","","","","2.02"]}}})
+def fake_facts(cik):
+    g=random.Random(cik); rev0=g.uniform(2e10,2e11); gr=g.uniform(-0.02,0.15); m=g.uniform(-0.05,0.3)
+    fy=lambda tag,f: {tag:{"units":{"USD":[{"start":f"{y}-01-01","end":f"{y}-12-31","val":f(y),
+                      "filed":f"{y+1}-02-15","form":"10-K"} for y in range(2010,2026)]}}}
+    q=lambda tag,v,unit="USD": {tag:{"units":{unit:[{"end":f"{y}-{mo}-30","val":v*g.uniform(.9,1.1),
+                      "filed":f"{y}-{mo}-30" if mo=="03" else f"{y+(mo=='12')}-{'02' if mo=='12' else mo}-28",
+                      "form":"10-Q"} for y in range(2010,2026) for mo in ("03","06","09","12")]}}}
+    rev=lambda y: rev0*(1+gr)**(y-2010)
+    gaap={**fy("Revenues",rev),**fy("NetIncomeLoss",lambda y: rev(y)*m*g.uniform(.7,1.3)),
+          **fy("NetCashProvidedByUsedInOperatingActivities",lambda y: rev(y)*(m+.05)),
+          **fy("PaymentsToAcquirePropertyPlantAndEquipment",lambda y: rev(y)*.04),
+          **q("StockholdersEquity",rev0*g.uniform(.3,2)),**q("LongTermDebt",rev0*g.uniform(0,1.5))}
+    return {"facts":{"us-gaap":gaap,"dei":q("EntityCommonStockSharesOutstanding",g.uniform(.5e9,3e9),"shares")}}
 s.requests.get=fake_get
 if __name__ == "__main__":
     sys.argv=["x"]+sys.argv[1:]; s.main()

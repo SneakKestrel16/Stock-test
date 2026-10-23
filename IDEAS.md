@@ -16,7 +16,10 @@ attributes listed exist; FRED's no-key CSV
 `data.sec.gov/api/xbrl/companyfacts/CIK##########.json` both returned HTTP 200.
 Other sources are named but not checked yet.
 
-## 1. Keep score (do this first)
+## 1. Keep score (do this first) — built 2026-10-22
+
+Built as `log_picks`, `track_record` and `backtest` in `stock_tracker.py`
+(CLI `track`, `backtest`; app tabs Track record, Backtest). See README.
 
 - **Pick journal.** Each time `pick` runs, save the date, ticker, price, score
   and factor scores to `~/.stock_tracker/picks.csv`. A "Track record" tab then

@@ -42,6 +42,19 @@ conversation where this project started.
     `~/.stock_tracker/reports/`.
   - yfinance news has two shapes (old flat dict vs new `{"content": {...}}`);
     both are handled in `news_events`.
+  - `track` / `backtest` (added 2026-10-22): `log_picks` appends the top 5 of
+    every pick run to `~/.stock_tracker/picks.csv`; `track_record` compares each
+    with SPY over the same trading days. `backtest` replays the pick monthly
+    using SEC XBRL `companyfacts` (cached in `~/.stock_tracker/sec_facts/`),
+    taking only figures filed by each date. Trailing P/E goes in the
+    `forwardPE` column so `apply_filters`/`score` are reused unchanged. Share
+    counts are multiplied by later splits to match yfinance's split-adjusted
+    `Close`; returns use `Adj Close`. Gotcha: never drop picks with no price
+    data from the track record (a delisted pick would vanish and flatter it).
+    Status: track checked on real Yahoo data; backtest checked only on fake
+    data (`tests/fake_run.py backtest`), because the real run needs the user's
+    SEC contact email. First real run: check that few tickers are "skipped" and
+    that market caps / P/Es look sane in `--csv` output.
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.
 - `tests/fake_run.py`: monkeypatches yfinance + requests with fake data so every
   command runs offline. Cloud sandboxes usually can't reach Yahoo or sec.gov,
