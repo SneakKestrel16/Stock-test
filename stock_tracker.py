@@ -2064,7 +2064,9 @@ def replay_data(contact, say=print, universe="list", interval="5m"):
                 for f in ("value", "quality", "growth", "momentum") if f in ranked}
         moves = day_ret.loc[prev, priced].dropna().sort_values(ascending=False)
         alts["yesterday's winners"], alts["yesterday's losers"] = list(moves.index[:64]), list(moves.index[::-1][:64])
+        listed = members.get(f"{prev:%Y-%m}", []) if members else tickers
         days[d] = {"order": list(ranked.index)[:cut], "top": basket(ranked), "pool": priced, "alts": alts,
+                   "missing": [t for t in listed if t not in set(priced)],   # survivorship gap: no Yahoo price
                    "atr": atr_pct.loc[prev].dropna().to_dict()}
     sessions = sorted(days)
     # 5-minute prices for every stock a test or a random basket could touch

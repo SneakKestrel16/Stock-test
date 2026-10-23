@@ -328,3 +328,34 @@ random median in 2. Conclusion: no rule set here reliably beats holding SPY;
 the last 60 days flattered swing. Next ideas: let `self_improve` choose
 challengers on the 3-year hourly history (less overfitting than 60 days), and
 allow a strategy (e.g. momentum only) to be a challenger, judged the same way.
+
+## Survivorship check: swing on the S&P 500 as it was, hourly, ~3 years (2026-10-24)
+
+The 64 list is today's survivors, so the swing results above are flattered.
+Rerun on the point-in-time S&P 500 funnel (top 64 each morning), same 722 days.
+
+Survivorship gap (members Yahoo has no price for): avg 10.9 a day of ~500
+(2.2%), max 20; 19 a day in 2023, 3 in 2026 (older = more gone). Another 5.7 a
+day had daily but no hourly price at the open. Most-missed: WBD, AVB, EA, CTRA,
+HOLX, K, DAY, IPG, WBA, ANSS, HES, JNPR, DFS, CTLT, QRVO. Several of these were
+taken over (HES by Chevron, ANSS by Synopsys, JNPR by HPE, DFS by Capital One,
+CTLT by Novo Holdings), not bankrupt: in the S&P 500 the missing ones are mostly
+buyouts, which usually jump on the news, so this gap may not flatter us much.
+Inference; prices for gone companies (paid data: Norgate, CRSP) would settle it.
+
+| $10,000 | All 722 days | 2023 H2 | 2024 H1 | 2024 H2 | 2025 H1 | 2025 H2 | 2026 H1 | 2026 H2 |
+|---|---|---|---|---|---|---|---|---|
+| Swing, current rules | 18,708 | 10,769 | 11,189 | 9,738 | 9,281 | 10,567 | 15,979 | 9,993 |
+| Swing, on trial | 17,168 | 10,252 | 11,521 | 9,504 | 9,047 | 10,780 | 15,364 | 10,832 |
+| SPY | 16,729 | 10,466 | 11,548 | 10,788 | 10,512 | 11,063 | 10,952 | 10,183 |
+| Random baskets, median | 14,503 | 10,777 | 10,317 | 10,590 | 10,305 | 10,172 | 10,733 | 9,999 |
+| Current beat % of random | 98% | 49% | 88% | 8% | 6% | 72% | 100% | 50% |
+| Growth only | 19,362 | 10,232 | 10,301 | 9,769 | 11,012 | 11,448 | 17,877 | 8,244 |
+| Momentum only | 12,749 | 9,771 | 11,740 | 9,879 | 9,039 | 10,282 | 21,045 | 8,718 |
+
+On the fairer list swing did better, not worse: $18,708 vs SPY $16,729, ahead of
+98% of random baskets (64 list: $15,439, 36%). But nearly all of it came from one
+half-year (2026 H1: +60%); it lost to SPY in 5 of 7 half-years and was near the
+bottom of random baskets in 2024 H2 and 2025 H1. A strategy whose result rests
+on one stretch is fragile. Swing still runs on the 64 list live; switching it to
+the funnel is a candidate for the self-tuning trial, not a change made by hand.

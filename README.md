@@ -61,6 +61,11 @@ use the shortcut. Tabs:
   period (88-95% in the last 60 days alone: a short lucky stretch). Nothing here
   reliably beats just holding SPY; momentum alone with the swing rules ($18,609)
   was the best of many tries, which makes it partly luck.
+  **Survivorship check:** the 64 list is today's survivors. On the S&P 500 as it
+  was each day (2.2% of members a day had no Yahoo prices, mostly companies
+  bought out since), swing made $18,708 vs SPY $16,729 and beat 98% of random
+  baskets, but almost all of it came from one half-year (2026 H1); it trailed
+  SPY in 5 of 7 half-years. Details in IDEAS.md.
   **Replay result** (30 trading days, 2026-09-14 to 2026-10-23, no peeking
   ahead): $10,000 became $9,553 (-4.5%). Holding the same top 5 all day with
   no auto-sells: -3.7%. SPY over the same hours: -0.6%. The 2% stop-loss fired
