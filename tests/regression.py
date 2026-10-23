@@ -4,6 +4,7 @@ folder, never your real ~/.stock_tracker. Opens a window for a few seconds.
     py tests/regression.py
 """
 import os, sys, runpy, tempfile, threading
+from datetime import date, datetime, timedelta
 from pathlib import Path
 os.environ["USERPROFILE"] = os.environ["HOME"] = tempfile.mkdtemp()   # before stock_tracker loads
 import numpy as np
@@ -69,6 +70,25 @@ assert any("One year held" in x for x in st.position_alerts("X", {"bought": 80, 
 assert not any("One year" in x for x in st.position_alerts("X", {"bought": 120, "added": near}, flat))
 assert len(st.position_alerts("X", {"bought": 80, "added": "x"}, flat)) == 1
 print("ok holding period")
+
+# day test: top 5 from today's ranking, ends today, each stop / take-profit sale's money
+# buys the next-ranked stock (fake prices jump +-25%, so both fire)
+real_close = st.market_close_today
+st.market_close_today = lambda: datetime.now() + timedelta(hours=1)
+real_screen, st.screen = st.screen, lambda *a, **k: (pd.DataFrame(index=st.DEFAULT_TICKERS[:12]), [])
+day = st.start_practice([], 10000, 1, 0.02, 0.03, day=True)
+assert len(day["positions"]) == 5 and day["queue"] and day["end"][:10] == f"{date.today()}"
+day = next(x for x in st.update_practice() if x["id"] == day["id"])
+sells = [x for x in day["trades"] if x["side"] == "SELL"]
+refills = [x for x in day["trades"] if x["reason"] == "next in ranking"]
+assert sells and refills and day["cash"] >= 0
+tr = day["trades"]
+for i, b in enumerate(tr):                 # a refill spends only the sale just before it
+    if b["reason"] == "next in ranking":
+        s = tr[i - 1]
+        assert s["side"] == "SELL" and b["shares"] * b["price"] <= s["shares"] * s["price"] + 1e-6
+st.market_close_today, st.screen = real_close, real_screen
+print("ok day test")
 
 # GUI: an error in a result callback must not stop later results; a stock added while
 # "Check for updates" runs must survive; removing a stock clears its events

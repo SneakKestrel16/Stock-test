@@ -1042,6 +1042,11 @@ class App:
             "Follow the picks: every 30 days switch to the new top 5 (leave Stocks empty to start "
             "with today's). This is the backtested strategy, tested forward in real time.")
         ).pack(anchor="w", pady=(6, 0))
+        self.p_day = tk.BooleanVar()
+        ttk.Checkbutton(new, variable=self.p_day, command=self.practice_day_toggle, text=(
+            "Day trade: ends at today's close. Sells at -2% / +3%; with Stocks empty it buys today's "
+            "top 5 and moves each sale's money into the next-ranked stock. Market hours only.")
+        ).pack(anchor="w", pady=(2, 0))
         ttk.Label(new, style="Muted.TLabel", text=(
             "Money is split evenly over the stocks (whole shares). Prices update every 5 minutes "
             "while the app is open; you can also buy and sell yourself. Results list appears when it ends.")
@@ -1097,20 +1102,27 @@ class App:
             return
         self.p_tickers.set(" ".join(self.ranked.index[:5]))
 
+    def practice_day_toggle(self):
+        day = self.p_day.get()
+        self.p_stop.set("2" if day else "15")
+        self.p_tp.set("3" if day else "")
+        if day:
+            self.p_follow.set(False)
+
     def practice_start(self):
         tickers = self.p_tickers.get().replace(",", " ").split()
         try:
             cash, days = float(self.p_cash.get()), int(self.p_days.get())
             stop = float(self.p_stop.get()) / 100
             tp = float(self.p_tp.get()) / 100 if self.p_tp.get().strip() else None
-            follow = self.p_follow.get()
-            assert (tickers or follow) and cash > 0 and days >= 1 and 0 < stop < 1 and (tp is None or tp > 0)
+            follow, day = self.p_follow.get(), self.p_day.get()
+            assert (tickers or follow or day) and cash > 0 and days >= 1 and 0 < stop < 1 and (tp is None or tp > 0)
         except (ValueError, AssertionError):
             messagebox.showwarning("Stock Tracker", "Enter stocks (e.g. MSFT KO), cash, days, and the "
                                    "auto-sell % (between 1 and 99).")
             return
         self.run_bg("Starting practice test at live prices...",
-                    lambda: (st.start_practice(tickers, cash, days, stop, tp, follow=follow),
+                    lambda: (st.start_practice(tickers, cash, days, stop, tp, follow=follow and not day, day=day),
                              st.update_practice())[1],
                     self.practice_done)
 

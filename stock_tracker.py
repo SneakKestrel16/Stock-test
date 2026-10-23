@@ -1577,14 +1577,31 @@ def _trade(test, t, side, shares, price, reason):
                            "pnl": None if pnl is None else round(pnl, 2)})
 
 
+def market_close_today():
+    """Local time of today's 15:55 New York (5 minutes before the close), if the market
+    is open now; ValueError otherwise."""
+    now_et = pd.Timestamp.now(tz="America/New_York")
+    open_, close = (now_et.normalize() + pd.Timedelta(hours=h, minutes=m) for h, m in ((9, 30), (15, 55)))
+    # ponytail: weekdays only, no holiday calendar; on a holiday prices just don't move
+    if now_et.weekday() >= 5 or not open_ <= now_et < close:
+        raise ValueError("A day test needs the market open: 9:30 to 15:55 New York time, Monday to Friday.")
+    return datetime.now() + (close - now_et).to_pytimedelta()
+
+
 def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=None, name=None,
-                   follow=False):
+                   follow=False, day=False):
     """Start a test: split `cash` evenly over `tickers`, whole shares, at live prices.
     follow: every 30 days, switch to the then-current top 5 (no tickers = today's top 5).
-    That is the backtested strategy, run forward in real time."""
-    if follow and not tickers:
-        tickers = basket(screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0])
-        name = name or "Follow the picks"
+    That is the backtested strategy, run forward in real time.
+    day: ends at today's close. With no tickers it buys today's top 5, and money from
+    each stop-loss / take-profit sale goes into the next stock in today's ranking."""
+    queue = []
+    end = market_close_today() if day else None
+    if (follow or day) and not tickers:
+        ranked = screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0]
+        tickers = basket(ranked)
+        queue = [t for t in ranked.index if t not in tickers] if day else []
+        name = name or ("Day trade " + f"{datetime.now():%Y-%m-%d}" if day else "Follow the picks")
     tickers = [t.upper() for t in tickers]
     if not tickers or cash <= 0 or days < 1:
         raise ValueError("Give at least one ticker, cash above 0 and at least 1 day.")
@@ -1594,7 +1611,8 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
         raise ValueError(f"No live price for {', '.join(bad)}. Check the ticker symbols.")
     now = datetime.now()
     test = {"id": f"{now:%Y%m%d-%H%M%S}", "name": name or ", ".join(tickers),
-            "start": f"{now:%Y-%m-%d %H:%M}", "end": f"{now + timedelta(days=days):%Y-%m-%d %H:%M}",
+            "start": f"{now:%Y-%m-%d %H:%M}", "end": f"{end or now + timedelta(days=days):%Y-%m-%d %H:%M}",
+            "day": day, "queue": queue,
             "cash0": cash, "cash": cash, "stop_pct": stop_pct, "take_profit": take_profit,
             "positions": {}, "trades": [], "spy_start": prices[BENCH], "status": "running",
             "history": [], "follow": follow, "switched": f"{now:%Y-%m-%d %H:%M}"}
@@ -1659,6 +1677,19 @@ def _switch(test, top, prices):
     test["switched"] = f"{datetime.now():%Y-%m-%d %H:%M}"
 
 
+def _refill(test, money_in, prices):
+    """Day tests: put one sale's money into the next priced stock in today's ranking."""
+    queue = test.get("queue") or []
+    while queue:
+        t = queue.pop(0)
+        p = prices.get(t)
+        if p and p == p and t not in test["positions"]:
+            shares = int(min(money_in, test["cash"]) // p)
+            if shares:
+                _trade(test, t, "BUY", shares, p, "next in ranking")
+            return
+
+
 def update_practice(end_now=None):
     """Refresh running tests: apply stop-loss / take-profit, record value, and end
     tests whose time is up (or `end_now`, a test id). Returns all tests."""
@@ -1670,7 +1701,8 @@ def update_practice(end_now=None):
     due = {x["id"] for x in running if x.get("follow") and datetime.now() - datetime.strptime(
         x.get("switched", x["start"]), "%Y-%m-%d %H:%M") >= timedelta(days=30)}
     top = basket(screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0]) if due else []
-    prices = live_prices(sorted({t for x in running for t in x["positions"]} | set(top) | {BENCH}))
+    spare = {t for x in running for t in x.get("queue", [])[:5]}      # day tests' next buys
+    prices = live_prices(sorted({t for x in running for t in x["positions"]} | set(top) | spare | {BENCH}))
     with STATE_LOCK:
         p = load_practice()                 # re-read: a trade may have happened meanwhile
         for test in p["tests"]:
@@ -1680,10 +1712,14 @@ def update_practice(end_now=None):
                 price = prices.get(t)
                 if not price or pd.isna(price):
                     continue
+                n = pos["shares"]
                 if price <= pos["cost"] * (1 - test["stop_pct"]):
-                    _trade(test, t, "SELL", pos["shares"], price, "stop-loss")
+                    _trade(test, t, "SELL", n, price, "stop-loss")
                 elif test.get("take_profit") and price >= pos["cost"] * (1 + test["take_profit"]):
-                    _trade(test, t, "SELL", pos["shares"], price, "take-profit")
+                    _trade(test, t, "SELL", n, price, "take-profit")
+                else:
+                    continue
+                _refill(test, n * price, prices)
             if test["id"] in due and top:
                 _switch(test, top, prices)
             _mark(test, prices)
@@ -1721,11 +1757,45 @@ def practice_lines(test):
     return lines
 
 
+def run_day(test):
+    """Keep a day test trading until it ends: check every 5 minutes, print each trade."""
+    if sys.platform == "win32":                            # no idle sleep while trading
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
+    seen = 0
+    while True:
+        for x in test["trades"][seen:]:
+            print(f"  {x['time'][11:]}  {x['side']:4} {x['shares']:>5} {x['ticker']:6} @ {money(x['price']):>10}"
+                  f"  {x['reason']}" + (f"  P/L {money(x['pnl'])}" if x["pnl"] is not None else ""), flush=True)
+        seen = len(test["trades"])
+        if test["status"] != "running":
+            return test
+        print(f"  {datetime.now():%H:%M}  worth {money(test['value'])} ({pct(test['value'] / test['cash0'] - 1)})",
+              flush=True)
+        try:
+            time.sleep(300)
+        except KeyboardInterrupt:
+            print("\n  Stopped watching. The test keeps its stocks; `practice` or the app updates it.")
+            return test
+        try:
+            test = next(x for x in update_practice() if x["id"] == test["id"])
+        except (requests.RequestException, OSError) as e:          # one bad fetch shouldn't end the day
+            print(f"  (update skipped: {e})")
+
+
 def cmd_practice(a):
+    day = a.action == "day"
+    stop = a.stop if a.stop is not None else 0.02 if day else 0.15
+    tp = a.take_profit if a.take_profit is not None or not day else 0.03
     try:
-        if a.action == "start":
-            test = start_practice(a.args, a.cash, a.days, a.stop, a.take_profit, follow=a.follow)
-            print(f"Started practice test {test['id']}.")
+        if a.action in ("start", "day"):
+            test = start_practice(a.args, a.cash, a.days, stop, tp, follow=a.follow, day=day)
+            if day:
+                print(f"Day test {test['id']}: sells at -{stop:.0%} / +{tp:.0%}, ends {test['end'][11:]} "
+                      "your time. Ctrl+C stops watching; the app's Practice tab keeps it going.\n")
+                test = run_day(test)
+            else:
+                print(f"Started practice test {test['id']}.")
             tests = [test]
         elif a.action in ("buy", "sell"):
             test_id, t, n = a.args
@@ -1845,12 +1915,14 @@ def main():
     p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("practice", help="practice trading with pretend money at live prices")
-    p.add_argument("action", nargs="?", default="status", choices=["status", "start", "buy", "sell", "end"])
-    p.add_argument("args", nargs="*", help="start: TICKERS | buy/sell: TEST_ID TICKER SHARES | end: TEST_ID")
+    p.add_argument("action", nargs="?", default="status",
+                   choices=["status", "start", "day", "buy", "sell", "end"])
+    p.add_argument("args", nargs="*", help="start: TICKERS | day: [TICKERS] (none = today's top 5, "
+                   "trades until today's close) | buy/sell: TEST_ID TICKER SHARES | end: TEST_ID")
     p.add_argument("--cash", type=float, default=10000.0, help="pretend starting cash (default 10000)")
     p.add_argument("--days", type=int, default=30, help="how long the test runs (default 30)")
-    p.add_argument("--stop", type=float, default=0.15, help="auto-sell this far below cost (default 0.15)")
-    p.add_argument("--take-profit", type=float, help="auto-sell this far above cost, e.g. 0.3")
+    p.add_argument("--stop", type=float, help="auto-sell this far below cost (default 0.15; day 0.02)")
+    p.add_argument("--take-profit", type=float, help="auto-sell this far above cost, e.g. 0.3 (day default 0.03)")
     p.add_argument("--follow", action="store_true",
                    help="switch to the current top 5 every 30 days (no tickers = today's top 5)")
     p.set_defaults(func=cmd_practice)

@@ -81,6 +81,12 @@ conversation where this project started.
   `backtest --universe sp500` (`sp500_members()`: old revisions of Wikipedia's
   "List of S&P 500 companies", CIK -> today's ticker, cached in
   `sp500_history.json`), one-year-held note in `position_alerts`.
+  Day-trade practice (2026-10-23): `start_practice(day=True)` ends at
+  `market_close_today()` (15:55 New York, weekdays, no holiday calendar),
+  keeps the rest of the ranking in `queue`; `update_practice` -> `_refill`
+  spends each stop / take-profit sale on the next queued stock. CLI
+  `practice day` loops via `run_day` (5 min); the app's 5-minute practice
+  refresh drives it in the GUI. First real day: $10,000 -> $10,120.67, SPY flat.
   Gotcha: `tests/fake_run.py` now switches HOME to a temp folder on import;
   before that, GUI drivers wrote fake picks into the real journal.
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.

@@ -33,7 +33,9 @@ use the shortcut. Tabs:
   with your watchlist) and recent web headlines.
 - **Practice**: try stocks with pretend money at live prices for N days, with
   automatic stop-loss / take-profit and your own buys and sells. When it
-  ends you get a results list vs SPY.
+  ends you get a results list vs SPY. **Day trade** runs for today only:
+  it buys today's top 5, sells any stock at -2% or +3%, moves that money into
+  the next-ranked stock, and sells everything at 3:55 pm New York time.
 - **Watchlist**, **History**, **Track record** (your past picks vs SPY),
   **Backtest** (the pick replayed over 10 past years) and **Settings** (SEC
   email, shortcut, light/dark colours, accent colour, text size, and an
@@ -50,6 +52,7 @@ py stock_tracker.py lookup MSFT              # everything about one stock (numbe
 py stock_tracker.py check MSFT               # extra checklist for one company
 py stock_tracker.py market                   # market weather
 py stock_tracker.py practice start MSFT KO --days 30 --take-profit 0.3
+py stock_tracker.py practice day             # trade today's top 5 until the close (market hours)
 py stock_tracker.py practice                 # update and show practice tests
 py stock_tracker.py history MSFT             # returns, worst drop, chart, CSV
 py stock_tracker.py add MSFT --bought 410.50 --stop 0.15
