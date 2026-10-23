@@ -68,7 +68,13 @@ market filter hurt most: it sat in cash after drops and missed the rebounds
 (2020, 2022-23). That matches what's commonly reported for simple trend
 filters on monthly data, but this is one test on one list (inference).
 
-## 2. Make the ranking itself steadier
+## 2. Make the ranking itself steadier — built / tested 2026-10-22
+
+Built: stability check (200 weight nudges, "Settled" column), top-5 basket.
+Tested and rejected (worse in backtest): ranking within sector; capping the
+basket at 2 per sector ($73,287 vs $80,211; cap of 1: $49,414). The app now
+just warns when 3+ of the top 5 share a sector. Not built: staying power
+(needs months of journal), bigger universe (see new ideas).
 
 - **Stability check.** Wiggle the factor weights a little 100 times and count
   how often the same stock comes out on top. Show it as "Top pick in 83 of 100
@@ -79,7 +85,11 @@ filters on monthly data, but this is one test on one list (inference).
   for an oil company. Rank each metric against companies in the same sector.
 - **Bigger universe.** Screen the whole S&P 500 instead of 64 hand-picked names.
 
-## 3. Market conditions ("is now a good time at all?")
+## 3. Market conditions — built 2026-10-22 (as information only)
+
+Built: Home tab panel and `market` command with all five signals below. As a
+trading rule (cash when SPY < 200-day) it did worse in the backtest, and the
+app says so next to the panel.
 
 A "Market weather" panel, shown above the pick. All are free:
 
@@ -96,7 +106,13 @@ A "Market weather" panel, shown above the pick. All are free:
 Use: when most signals are bad, say "consider waiting or buying smaller
 amounts". It never suggests betting against the market.
 
-## 4. More facts about each company
+## 4. More facts about each company — mostly built 2026-10-22
+
+Built as the Checklist (`check TICKER`, Pick tab button): earnings surprises,
+estimate changes, insider trades, analyst mood trend, short interest, share
+count, dividend payout. Context only: Yahoo keeps no history, so the daily run
+now saves snapshots (`check_snapshots.csv`) to test them later. Not built yet:
+Piotroski / Altman scores, long-term track record.
 
 From sources already in use (yfinance, SEC):
 
@@ -115,7 +131,10 @@ From sources already in use (yfinance, SEC):
   growers vs. boom-and-bust. How far the stock fell in 2008, 2020 and 2022.
   Years of dividend increases.
 
-## 5. Reading the news and what people say
+## 5. Reading the news and what people say — not built
+
+Skipped for now: weakest evidence for the effort; AI summary needs an API key
+and costs per run.
 
 - **Headline mood.** Score each headline positive/negative and show the trend.
   Simple word lists (e.g. the VADER library) are cheap; an AI model reads
@@ -132,7 +151,10 @@ From sources already in use (yfinance, SEC):
 - **Social media buzz** (Reddit, StockTwits): very noisy and easy to
   manipulate. Useful at most as a "lots of hype, be careful" warning.
 
-## 6. Protecting against mistakes
+## 6. Protecting against mistakes — built 2026-10-22
+
+All four are in the Checklist (ATR stop, earnings warning, watchlist overlap,
+missing-data warning).
 
 - **Stop-loss sized to the stock.** Use the stock's normal daily swing (ATR,
   "average true range") instead of a flat 15%, so calm stocks get tighter
@@ -144,13 +166,37 @@ From sources already in use (yfinance, SEC):
 - **Data sanity checks.** Flag missing or odd numbers (yfinance sometimes
   returns glitches) and lower the confidence instead of quietly scoring 0.5.
 
-## 7. Automation
+## 7. Automation — built 2026-10-22
+
+Settings > Automatic daily run (Task Scheduler, weekdays): journal a pick,
+check the watchlist, update practice tests, save checklist snapshots.
+Not yet verified by actually creating the task on this PC.
 
 - Run `pick` and `watch` each morning with Windows Task Scheduler, so the pick
   journal fills up on its own and the track record grows.
 
-## Suggested order
+## New ideas (2026-10-22, from building the above)
 
-1 (journal + backtest), then 3 (market weather), then 2 (stability + sector
-ranking), then 4, then 5. Each step is checked against the journal from 1
-before it's kept.
+Ranked by expected value for effort. Same rule: measure before keeping.
+
+1. **BUILT** (`practice start --follow`, Practice tab checkbox). **Practice "follow the picks" mode.** A practice test that re-buys the
+   current top 5 every month. The honest real-time test of the exact strategy
+   the backtest measures, without hindsight in the stock list going forward.
+2. **Hindsight-free stock list.** Use S&P 500 membership as of each backtest
+   date (Wikipedia keeps a table of changes; unverified source) so the backtest
+   stops choosing among today's winners. Biggest known flaw in the numbers.
+3. **Out-of-sample check.** Before trusting any weight change, tune on
+   2016-2021 and test on 2021-2026. A tweak that only wins in-sample is luck.
+4. **TESTED: monthly is best.** Top 5: monthly $80,211 (worst drop -21.4%),
+   quarterly $64,556 (-26.4%), every 6 months $75,883 (-31.8%); `backtest --every N`.
+   **Rebalance less often.** Test quarterly vs monthly: fewer trades means
+   lower costs and taxes in real life, possibly similar returns.
+5. **Test the snapshots.** After ~12 months of `check_snapshots.csv`, check
+   whether "analysts raising estimates" or "insider buying" picked better stocks.
+6. **BUILT** (Budget box on the Pick tab). **Position-size helper.** "How many shares for $X, staying under 5% of
+   savings" on the Pick card.
+7. **Holding-period note.** On the watchlist, show when a position passes one
+   year (US long-term capital gains are taxed lower; inference, check local rules).
+8. **Desktop notification** when the daily run finds a stop-loss hit or red flag.
+9. Piotroski F-score from SEC data, then backtest it as a quality factor.
+

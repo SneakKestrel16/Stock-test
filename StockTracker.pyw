@@ -320,7 +320,7 @@ class App:
     def show_checklist(self, ticker, checks):
         win = tk.Toplevel(self.root)
         win.title(f"Checklist: {ticker}")
-        win.geometry("720x640")
+        win.geometry("760x760")
         win.configure(background=PALETTE["bg"])
         box = ttk.Frame(win, padding=14)
         box.pack(fill="both", expand=True)
@@ -398,6 +398,10 @@ class App:
         ttk.Label(top, text="   Stop-loss %:").pack(side="left")
         self.pick_stop = tk.StringVar(value="15")
         ttk.Entry(top, textvariable=self.pick_stop, width=5).pack(side="left")
+        ttk.Label(top, text="   Budget $:").pack(side="left")
+        self.budget = tk.StringVar(value="1000")
+        ttk.Entry(top, textvariable=self.budget, width=7).pack(side="left")
+        self.budget.trace_add("write", lambda *a: self.show_candidate())
         ttk.Label(top, text=f"   Screens {len(st.DEFAULT_TICKERS)} large US companies (~1 minute).",
                   style="Muted.TLabel").pack(side="left")
 
@@ -435,6 +439,8 @@ class App:
         self.rank_tv.bind("<<TreeviewSelect>>", lambda e: self.show_candidate())
         ttk.Label(right, text=st.BASKET_NOTE.replace("\n", " "), wraplength=480,
                   style="Bold.TLabel").pack(anchor="w", pady=(8, 0))
+        self.sector_note = tk.StringVar()
+        ttk.Label(right, textvariable=self.sector_note, wraplength=480, style="Warn.TLabel").pack(anchor="w")
         ttk.Label(right, text="Safety filters (stocks removed):", style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
         self.filters = tk.StringVar()
         ttk.Label(right, textvariable=self.filters, justify="left", style="Muted.TLabel").pack(anchor="w")
@@ -462,6 +468,7 @@ class App:
     def pick_done(self, result):
         df, report = result
         st.log_picks(df)
+        self.sector_note.set(st.sector_warning(df) if not df.empty else "")
         self.filters.set("\n".join(f"  {label}: {n}" for label, n in report))
         self.rank_tv.delete(*self.rank_tv.get_children())
         self.ranked = df
@@ -508,9 +515,22 @@ class App:
             f"  Suggested stop-loss: {st.money(stop)} ({self.stop_frac:.0%} below today).\n"
             f"  The Checklist also gives one sized to this stock's normal swings.\n"
             f"  Selling there caps your loss; you can never lose more than you invest.\n"
-            f"  Keep any single stock to a small slice of your savings (many use <=5%).")
+            f"  Keep any single stock to a small slice of your savings (many use <=5%).\n\n"
+            f"{self.budget_line(r['price'])}")
         for b in self.pick_btns:
             b.configure(state="normal")
+
+    def budget_line(self, price):
+        """Whole shares a budget buys: for this stock alone, and per stock in the top-5 basket."""
+        try:
+            budget = float(self.budget.get())
+            assert budget > 0 and price > 0
+        except (ValueError, AssertionError, TypeError):
+            return "Budget: enter an amount above to see how many shares it buys."
+        one = int(budget // price)
+        each = int(budget / 5 // price)
+        return (f"With {st.money(budget)}: {one} share(s) of this stock ({st.money(one * price)}),\n"
+                f"  or {each} share(s) of it as one fifth of a top-5 basket ({st.money(each * price)}).")
 
     def pick_checklist(self):
         t = self.selected_ticker()
@@ -802,7 +822,12 @@ class App:
             ttk.Entry(row, textvariable=var, width=w).pack(side="left", padx=2)
         ttk.Button(row, text="Start test", style="Accent.TButton",
                    command=self.practice_start).pack(side="left", padx=8)
-        ttk.Label(new, foreground="gray", text=(
+        self.p_follow = tk.BooleanVar()
+        ttk.Checkbutton(new, variable=self.p_follow, text=(
+            "Follow the picks: every 30 days switch to the new top 5 (leave Stocks empty to start "
+            "with today's). This is the backtested strategy, tested forward in real time.")
+        ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(new, style="Muted.TLabel", text=(
             "Money is split evenly over the stocks (whole shares). Prices update every 5 minutes "
             "while the app is open; you can also buy and sell yourself. Results list appears when it ends.")
         ).pack(anchor="w", pady=(4, 0))
@@ -863,13 +888,15 @@ class App:
             cash, days = float(self.p_cash.get()), int(self.p_days.get())
             stop = float(self.p_stop.get()) / 100
             tp = float(self.p_tp.get()) / 100 if self.p_tp.get().strip() else None
-            assert tickers and cash > 0 and days >= 1 and 0 < stop < 1 and (tp is None or tp > 0)
+            follow = self.p_follow.get()
+            assert (tickers or follow) and cash > 0 and days >= 1 and 0 < stop < 1 and (tp is None or tp > 0)
         except (ValueError, AssertionError):
             messagebox.showwarning("Stock Tracker", "Enter stocks (e.g. MSFT KO), cash, days, and the "
                                    "auto-sell % (between 1 and 99).")
             return
         self.run_bg("Starting practice test at live prices...",
-                    lambda: (st.start_practice(tickers, cash, days, stop, tp), st.update_practice())[1],
+                    lambda: (st.start_practice(tickers, cash, days, stop, tp, follow=follow),
+                             st.update_practice())[1],
                     self.practice_done)
 
     def practice_refresh(self, quiet=False):

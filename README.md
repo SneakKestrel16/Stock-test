@@ -18,12 +18,20 @@ py -m pip install -r requirements.txt
 
 Double-click **`Start Stock Tracker.bat`** once. The app opens and offers to put a
 **Stock Tracker** shortcut on your desktop (also in its Settings tab). After that,
-use the shortcut. Tabs: **Pick** (best buy candidate + ranked list), **History**
-(returns, worst drop, chart, save CSV), **Watchlist** (your stocks, stop-loss
-levels, news/filings/analyst changes; red rows need a closer look),
-**Track record** (how your past picks did vs SPY), **Backtest** (the pick
-replayed over past years) and **Settings** (SEC contact email, data folder,
-shortcut).
+use the shortcut. Tabs:
+
+- **Home**: how-to steps, your alerts and practice tests at a glance, and
+  "market weather" (market trend, fear gauge, recession and credit warnings).
+- **Pick**: ranks big US companies; the top 5 is the suggested basket. Each
+  stock has a **Checklist** (forecast changes, insider buying, earnings date,
+  dividend safety, share buybacks, a stop-loss sized to the stock, overlap
+  with your watchlist).
+- **Practice**: try stocks with pretend money at live prices for N days, with
+  automatic stop-loss / take-profit and your own buys and sells. When it
+  ends you get a results list vs SPY.
+- **Watchlist**, **History**, **Track record** (your past picks vs SPY),
+  **Backtest** (the pick replayed over 10 past years) and **Settings** (SEC
+  email, shortcut, and an optional automatic weekday run).
 
 If something goes wrong, the app shows a message and logs details to
 `~/.stock_tracker/app_error.log`.
@@ -31,7 +39,11 @@ If something goes wrong, the app shows a message and logs details to
 ## Command line
 
 ```powershell
-py stock_tracker.py pick --add               # best buy candidate (+ add to watchlist)
+py stock_tracker.py pick --add               # top candidates (+ add #1 to watchlist)
+py stock_tracker.py check MSFT               # extra checklist for one company
+py stock_tracker.py market                   # market weather
+py stock_tracker.py practice start MSFT KO --days 30 --take-profit 0.3
+py stock_tracker.py practice                 # update and show practice tests
 py stock_tracker.py history MSFT             # returns, worst drop, chart, CSV
 py stock_tracker.py add MSFT --bought 410.50 --stop 0.15
 py stock_tracker.py watch                    # what's new since last check
@@ -39,6 +51,7 @@ py stock_tracker.py list
 py stock_tracker.py remove MSFT
 py stock_tracker.py track                    # past picks vs SPY (--all adds runners-up)
 py stock_tracker.py backtest --csv bt.csv    # replay the pick over 10 past years
+py stock_tracker.py daily                    # what the automatic run does
 py stock_tracker.py setup --contact you@example.com   # enables SEC filings
 ```
 
@@ -52,7 +65,14 @@ the top N.
    negative free cash flow, below its 200-day average, or extreme debt.
 3. Rank the rest on **value**, **quality**, **growth** and **momentum**
    (percentile ranks, equal weights by default; change with `--weights`).
-4. Suggest a stop-loss (default 15% below the price) to cap the loss.
+4. Suggest the top 5 as a basket (split evenly) and a stop-loss (default 15%
+   below the price) to cap the loss. "Settled" shows how often a stock stays
+   in the top 5 when the weights are nudged.
+
+Ideas tested in the backtest and **rejected** because they did worse (still
+available as options): ranking within sectors (`--sector`), sitting in cash
+when the market trends down (`--market-filter`), capping sectors in the
+basket (`--sector-cap`). Details in `IDEAS.md`.
 
 ## Does the pick actually work?
 

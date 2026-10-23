@@ -62,6 +62,17 @@ conversation where this project started.
       These "sit out" and are listed in the output (`info["unvalued"]`).
     Sanity script approach: compare market cap / P/E at a few dates with known
     values (MSFT 2019 ~$1.0T, GOOGL 2019 ~$750B, NVDA 2019 ~$100B).
+- Added 2026-10-22 (all in `stock_tracker.py`, app tabs in `StockTracker.pyw`):
+  `stability()` + `basket()` (top 5, "Settled"), `sector_warning()`,
+  `market_weather()` (FRED needs requests' default User-Agent), `company_checks()`
+  (checklist, context only), practice trading (`practice.json`, `start_practice`,
+  `update_practice`, follow mode switches every 30 days via `_switch`),
+  `cmd_daily` + Settings Task Scheduler job, `snapshot_checks()`.
+  Backtest options tested and rejected: `--sector`, `--market-filter`,
+  `--sector-cap`, `--every` > 1. Results in IDEAS.md.
+  App theme: `apply_style()` on ttk clam. Gotcha: Tk font sizes must be ints.
+  Offline checks: `tests/regression.py`; screenshots need a driver like
+  `tests/fake_gui.py` + PIL ImageGrab.
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.
 - `tests/fake_run.py`: monkeypatches yfinance + requests with fake data so every
   command runs offline. Cloud sandboxes usually can't reach Yahoo or sec.gov,

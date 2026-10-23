@@ -284,6 +284,29 @@ Spread it out: the top 5 together, split evenly. In the 10-year backtest the
 top 5 grew more and fell less than the single top pick (see Backtest)."""
 
 
+def basket(ranked, sectors=None, n=5, cap=None):
+    """Top `n` tickers in rank order, at most `cap` from any one sector (None = no cap)."""
+    out, count = [], {}
+    for t in ranked.index:
+        s = (sectors or {}).get(t) or (ranked.at[t, "sector"] if "sector" in ranked else "")
+        if cap and s and count.get(s, 0) >= cap:
+            continue
+        out.append(t)
+        count[s] = count.get(s, 0) + 1
+        if len(out) == n:
+            break
+    return out
+
+
+def sector_warning(ranked, n=5):
+    """Plain warning when 3+ of the top n share a sector, else ''."""
+    top = ranked.head(n)["sector"].replace("", "unknown").value_counts() if "sector" in ranked else None
+    if top is None or top.empty or top.iloc[0] < 3:
+        return ""
+    return (f"Note: {top.iloc[0]} of the top {n} are {top.index[0]}; they tend to move together. "
+            "(In the backtest, forcing a mix of sectors did worse, so this is your call.)")
+
+
 def stability(ranked, weights, runs=200, seed=0):
     """How settled the ranking is: nudge each factor weight to 50-150% of itself
     `runs` times and count how often each stock comes out #1 and in the top 5."""
@@ -389,6 +412,8 @@ def cmd_pick(a):
           f"(top 5 in {top['stable5']:.0%}).")
 
     print("\n  " + BASKET_NOTE.replace("\n", "\n  "))
+    if sector_warning(df):
+        print("  " + sector_warning(df))
     for rt, r in df.iloc[:5].iterrows():
         print(f"    {rt:6} {r['name'][:26]:26} score {r['score']:.2f}  price {money(r['price']):>10}"
               f"  top-5 in {r['stable5']:.0%} of variations")
@@ -703,15 +728,38 @@ def watch_all(days=30, show_all=False, progress=None):
     return results, save_report(results) if results else None
 
 
+SNAPSHOT_FILE = HOME / "check_snapshots.csv"
+
+
+def snapshot_checks(tickers):
+    """Save today's checklist for these tickers + the watchlist. Yahoo keeps no history
+    of forecasts or insider trades, so this builds one: after a year or so, the
+    backtest can test whether those checks predicted anything."""
+    names = list(dict.fromkeys(list(tickers) + list(load_state()["watchlist"])))
+    rows = [{"date": str(date.today()), "ticker": t, "check": c[0], "result": c[1], "mood": c[2]}
+            for t in names for c in company_checks(t)]
+    if rows:
+        pd.DataFrame(rows).to_csv(SNAPSHOT_FILE, mode="a", header=not SNAPSHOT_FILE.exists(), index=False)
+    return len(rows)
+
+
 def cmd_daily(a):
     """Unattended run for Task Scheduler: save today's pick to the journal, check the
     watchlist, update practice tests. Writes a line per step to daily.log."""
     lines = [f"--- {datetime.now():%Y-%m-%d %H:%M}"]
+    top = []
+
+    def pick():
+        df = screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0]
+        log_picks(df)
+        top.extend(df.index[:5])
+        return "saved to journal"
+
     for label, step in (
-            ("pick", lambda: log_picks(screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0])
-             or "saved to journal"),
+            ("pick", pick),
             ("watch", lambda: f"report {watch_all()[1]}"),
-            ("practice", lambda: f"{len(update_practice())} tests updated")):
+            ("practice", lambda: f"{len(update_practice())} tests updated"),
+            ("snapshots", lambda: f"{snapshot_checks(top)} rows")):
         try:
             lines.append(f"{label}: {step()}")
         except Exception as e:
@@ -925,7 +973,7 @@ def fact_asof(f, day, years_back=0):
 
 
 def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, progress=None,
-             sector_neutral=False, market_filter=False):
+             sector_neutral=False, market_filter=False, sector_cap=None, every=1):
     """Replay `pick` at every month-end of the past `years`, using only data public
     at the time, and hold the pick for one month. Returns (monthly_df, summary, info).
     market_filter: hold cash for the month when SPY is below its 200-day average."""
@@ -951,7 +999,8 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
         except Exception:
             frames[t] = {}      # counted below as "couldn't be valued"
 
-    sectors = get_sectors(tickers) if sector_neutral else None
+    all_sectors = get_sectors(tickers) if sector_neutral or sector_cap else {}
+    sectors = all_sectors if sector_neutral else None
     mom = adj.shift(21) / adj.shift(252) - 1
     ret6 = adj / adj.shift(126) - 1
     ma200 = adj.rolling(200).mean()
@@ -959,7 +1008,7 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
     month_ends = month_ends[month_ends >= adj.index[0] + pd.DateOffset(months=13)]
     nan = float("nan")
 
-    rows, unvalued = [], {}
+    rows, unvalued, held = [], {}, []
     for k, (d, d2) in enumerate(zip(month_ends[:-1], month_ends[1:]), 1):
         say(f"Replaying month {k}/{len(month_ends) - 1} ({d:%Y-%m})...")
         feats = []
@@ -987,7 +1036,10 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
         df, _ = apply_filters(df, min_mcap)
         if len(df):
             df = df.join(score(df, weights, sectors)).sort_values("score", ascending=False)
-        top = list(df.index[:5])
+        top = basket(df, all_sectors, cap=sector_cap)
+        if every > 1 and (k - 1) % every and held:
+            top = held                   # not a rebalance month: keep last picks
+        held = top
         if market_filter and adj.at[d, BENCH] < ma200.at[d, BENCH]:
             top = []                     # market in a downtrend: sit in cash this month
         fwd = (adj.loc[d2] / adj.loc[d] - 1).fillna(0.0)
@@ -1057,7 +1109,8 @@ def cmd_backtest(a):
     try:
         m, summary, info = backtest(years=a.years, min_mcap=a.min_mcap,
                                     contact=load_state().get("contact"),
-                                    sector_neutral=a.sector, market_filter=a.market_filter)
+                                    sector_neutral=a.sector, market_filter=a.market_filter,
+                                    sector_cap=a.sector_cap, every=a.every)
     except ValueError as e:
         sys.exit(str(e))
     print()
@@ -1340,8 +1393,14 @@ def _trade(test, t, side, shares, price, reason):
                            "pnl": None if pnl is None else round(pnl, 2)})
 
 
-def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=None, name=None):
-    """Start a test: split `cash` evenly over `tickers`, whole shares, at live prices."""
+def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=None, name=None,
+                   follow=False):
+    """Start a test: split `cash` evenly over `tickers`, whole shares, at live prices.
+    follow: every 30 days, switch to the then-current top 5 (no tickers = today's top 5).
+    That is the backtested strategy, run forward in real time."""
+    if follow and not tickers:
+        tickers = basket(screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0])
+        name = name or "Follow the picks"
     tickers = [t.upper() for t in tickers]
     if not tickers or cash <= 0 or days < 1:
         raise ValueError("Give at least one ticker, cash above 0 and at least 1 day.")
@@ -1354,7 +1413,7 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
             "start": f"{now:%Y-%m-%d %H:%M}", "end": f"{now + timedelta(days=days):%Y-%m-%d %H:%M}",
             "cash0": cash, "cash": cash, "stop_pct": stop_pct, "take_profit": take_profit,
             "positions": {}, "trades": [], "spy_start": prices[BENCH], "status": "running",
-            "history": []}
+            "history": [], "follow": follow, "switched": f"{now:%Y-%m-%d %H:%M}"}
     each = cash / len(tickers)
     for t in tickers:
         shares = int(each // prices[t])
@@ -1401,6 +1460,21 @@ def practice_trade(test_id, ticker, side, shares):
     return test
 
 
+def _switch(test, top, prices):
+    """Monthly switch for 'follow the picks': sell what left the top 5, split the
+    cash evenly over newcomers (whole shares)."""
+    for t, pos in list(test["positions"].items()):
+        if t not in top and prices.get(t) == prices.get(t) and prices.get(t):
+            _trade(test, t, "SELL", pos["shares"], prices[t], "left top 5")
+    new = [t for t in top if t not in test["positions"] and prices.get(t) == prices.get(t) and prices.get(t)]
+    each = test["cash"] / len(new) if new else 0
+    for t in new:
+        shares = int(each // prices[t])
+        if shares:
+            _trade(test, t, "BUY", shares, prices[t], "joined top 5")
+    test["switched"] = f"{datetime.now():%Y-%m-%d %H:%M}"
+
+
 def update_practice(end_now=None):
     """Refresh running tests: apply stop-loss / take-profit, record value, and end
     tests whose time is up (or `end_now`, a test id). Returns all tests."""
@@ -1409,7 +1483,10 @@ def update_practice(end_now=None):
     running = [x for x in p["tests"] if x["status"] == "running"]
     if not running:
         return p["tests"]
-    prices = live_prices(sorted({t for x in running for t in x["positions"]} | {BENCH}))
+    due = {x["id"] for x in running if x.get("follow") and datetime.now() - datetime.strptime(
+        x.get("switched", x["start"]), "%Y-%m-%d %H:%M") >= timedelta(days=30)}
+    top = basket(screen(DEFAULT_TICKERS, parse_weights(None), 10e9, None)[0]) if due else []
+    prices = live_prices(sorted({t for x in running for t in x["positions"]} | set(top) | {BENCH}))
     with STATE_LOCK:
         p = load_practice()                 # re-read: a trade may have happened meanwhile
         for test in p["tests"]:
@@ -1423,6 +1500,8 @@ def update_practice(end_now=None):
                     _trade(test, t, "SELL", pos["shares"], price, "stop-loss")
                 elif test.get("take_profit") and price >= pos["cost"] * (1 + test["take_profit"]):
                     _trade(test, t, "SELL", pos["shares"], price, "take-profit")
+            if test["id"] in due and top:
+                _switch(test, top, prices)
             _mark(test, prices)
             if test["id"] == end_now or datetime.now() >= datetime.strptime(test["end"], "%Y-%m-%d %H:%M"):
                 for t, pos in list(test["positions"].items()):
@@ -1461,7 +1540,7 @@ def practice_lines(test):
 def cmd_practice(a):
     try:
         if a.action == "start":
-            test = start_practice(a.args, a.cash, a.days, a.stop, a.take_profit)
+            test = start_practice(a.args, a.cash, a.days, a.stop, a.take_profit, follow=a.follow)
             print(f"Started practice test {test['id']}.")
             tests = [test]
         elif a.action in ("buy", "sell"):
@@ -1561,6 +1640,8 @@ def main():
                    help="rank value/quality within each sector (tested 2026-10: did worse)")
     p.add_argument("--market-filter", action="store_true",
                    help="hold cash when SPY is below its 200-day average (tested 2026-10: did worse)")
+    p.add_argument("--sector-cap", type=int, help="at most N per sector in the top 5 (tested 2026-10: did worse)")
+    p.add_argument("--every", type=int, default=1, help="re-pick every N months (tested 2026-10: monthly best)")
     p.set_defaults(func=cmd_backtest)
 
     sub.add_parser("daily", help="unattended: journal a pick, check watchlist, update practice"
@@ -1580,6 +1661,8 @@ def main():
     p.add_argument("--days", type=int, default=30, help="how long the test runs (default 30)")
     p.add_argument("--stop", type=float, default=0.15, help="auto-sell this far below cost (default 0.15)")
     p.add_argument("--take-profit", type=float, help="auto-sell this far above cost, e.g. 0.3")
+    p.add_argument("--follow", action="store_true",
+                   help="switch to the current top 5 every 30 days (no tickers = today's top 5)")
     p.set_defaults(func=cmd_practice)
 
     p = sub.add_parser("add", help="add a stock to your watchlist")
