@@ -100,6 +100,10 @@ conversation where this project started.
   `_refill` as live. Gotcha: the replay ranks on trailing P/E from SEC, live
   `pick` on Yahoo's forward P/E, so their top 5 differ (2026-10-23: replay JNJ
   MSFT LLY CSCO ADBE, live CVX COP XOM NVDA AMD). Result in README.
+  Rules: `DAY_RULES` (stop/atr/trail/tp/refill/overnight) drive live day tests
+  (`test["trail"]`, `test["refill"]`, `test["stops"]` read by `_auto_sell` /
+  `_refill`) and `day_replay`. `replay_data()` loads once so variants are fast.
+  Tuning results in IDEAS.md ("Day-trade rule tuning").
   Gotcha: `tests/fake_run.py` now switches HOME to a temp folder on import;
   before that, GUI drivers wrote fake picks into the real journal.
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.

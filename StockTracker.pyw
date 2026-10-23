@@ -1056,8 +1056,8 @@ class App:
         self.p_follow_cb.pack(anchor="w", pady=(6, 0))
         self.p_day = tk.BooleanVar()
         ttk.Checkbutton(new, variable=self.p_day, command=self.practice_day_toggle, text=(
-            "Day trade: ends at today's close. Sells at -2% / +3%; with Stocks empty it buys today's "
-            "top 5 and moves each sale's money into the next-ranked stock (or SPY when none is left). Market hours only.")
+            "Day trade: ends at today's close. With Stocks empty it buys today's top 5; sells a stock "
+            "that falls 2% below its highest price today and puts that money in SPY. Market hours only.")
         ).pack(anchor="w", pady=(2, 0))
         ttk.Label(new, style="Muted.TLabel", text=(
             "Money is split evenly over the stocks (whole shares). Prices update every 5 minutes "
@@ -1117,7 +1117,7 @@ class App:
     def practice_day_toggle(self):
         day = self.p_day.get()
         self.p_stop.set("2" if day else "15")
-        self.p_tp.set("3" if day else "")
+        self.p_tp.set("")
         if day:
             self.p_follow.set(False)
         state = "disabled" if day else "normal"       # a day test ignores both

@@ -1704,7 +1704,8 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
     now = datetime.now()
     test = {"id": f"{now:%Y%m%d-%H%M%S}", "name": name or ", ".join(tickers),
             "start": f"{now:%Y-%m-%d %H:%M}", "end": f"{end or now + timedelta(days=days):%Y-%m-%d %H:%M}",
-            "day": day, "queue": queue,
+            "day": day, "queue": queue, "trail": day and DAY_RULES["trail"],
+            "refill": DAY_RULES["refill"] if day else "next",
             "cash0": cash, "cash": cash, "stop_pct": stop_pct, "take_profit": take_profit,
             "positions": {}, "trades": [], "spy_start": prices[BENCH], "status": "running",
             "history": [], "follow": follow, "switched": f"{now:%Y-%m-%d %H:%M}"}
@@ -1769,8 +1770,12 @@ def _refill(test, prices):
     """Day tests, right after a sale: put the cash into the next stock in today's
     ranking that has a price and isn't held (stocks without a price stay in line for
     the next round). When none is left, park the cash in SPY so it still moves with
-    the market instead of sitting idle."""
-    queue = test.get("queue") or []
+    the market instead of sitting idle. test["refill"]: "next" (default), "spy" (straight
+    to SPY) or "none" (keep the cash)."""
+    mode = test.get("refill", "next")
+    if mode == "none":
+        return
+    queue = (test.get("queue") or []) if mode == "next" else []
     for t in queue:
         p = prices.get(t)
         if p and p == p and t not in test["positions"] and test["cash"] >= p:
@@ -1783,14 +1788,18 @@ def _refill(test, prices):
 
 
 def _auto_sell(test, prices):
-    """Stop-loss / take-profit sales at these prices; day tests refill after each."""
+    """Stop-loss / take-profit sales at these prices; day tests refill after each.
+    test["stops"] gives a stop % per stock (else test["stop_pct"]); test["trail"]
+    measures the stop from the highest price since buying instead of the cost."""
     for t, pos in list(test["positions"].items()):
         price = prices.get(t)
         if not price or pd.isna(price):
             continue
         if t == BENCH and test.get("day"):
             continue                      # parked cash rides SPY until the close
-        if price <= pos["cost"] * (1 - test["stop_pct"]):
+        pos["peak"] = max(pos.get("peak", pos["cost"]), price)
+        ref = pos["peak"] if test.get("trail") else pos["cost"]
+        if price <= ref * (1 - test.get("stops", {}).get(t, test["stop_pct"])):
             _trade(test, t, "SELL", pos["shares"], price, "stop-loss")
         elif test.get("take_profit") and price >= pos["cost"] * (1 + test["take_profit"]):
             _trade(test, t, "SELL", pos["shares"], price, "take-profit")
@@ -1882,12 +1891,16 @@ def run_day(test):
             print(f"  (update skipped: {e})")
 
 
-def day_replay(days=30, cash=10000.0, stop_pct=0.02, take_profit=0.03, contact=None, say=print):
-    """Replay the day-trade rules on Yahoo's 5-minute bars for the last `days` full
-    sessions, with no peeking: each morning's ranking uses only daily closes up to
-    the day before and SEC figures filed by then; during the day each decision sees
-    only bars already finished. Money carries over from day to day.
-    Returns (days_df, trades_df, summary)."""
+# Tuned 2026-10-24 on Yahoo's 60 days of 5-minute bars (first 30 to choose, last 30 to
+# judge): trailing stop, no take-profit and refill into SPY each won on both halves.
+# Small gains (+$76 per $10,000 on the unseen days) and the rules still lost money.
+DAY_RULES = {"stop": 0.02, "atr": None, "trail": True, "tp": None, "refill": "spy", "overnight": False}
+
+
+def replay_data(contact, say=print):
+    """Everything a day-trade replay needs, loaded once: Yahoo's 5-minute bars (last ~60
+    sessions) and, per session, the ranking made from the day before's close (SEC
+    figures filed by then) and each stock's daily swing (14-day ATR as % of price)."""
     if not contact:
         raise ValueError("The replay ranks stocks with old SEC reports. Set your SEC contact "
                          "email first (Settings tab, or: setup --contact you@example.com).")
@@ -1898,7 +1911,7 @@ def day_replay(days=30, cash=10000.0, stop_pct=0.02, take_profit=0.03, contact=N
     bars.index = bars.index.tz_convert(NY)
     stamp = bars.index.strftime("%H:%M")
     sessions = [d for d in sorted(set(bars.index.date))
-                if {"09:30", "15:50"} <= set(stamp[bars.index.date == d])][-days:]
+                if {"09:30", "15:50"} <= set(stamp[bars.index.date == d])]
     if not sessions:
         raise ValueError("No complete trading days in Yahoo's 5-minute data.")
     say("Downloading daily prices for the morning rankings...")
@@ -1914,56 +1927,85 @@ def day_replay(days=30, cash=10000.0, stop_pct=0.02, take_profit=0.03, contact=N
         except Exception:
             frames[t] = {}
     sigs = price_signals(adj)
-
-    test = {"cash": cash, "positions": {}, "trades": [], "stop_pct": stop_pct,
-            "take_profit": take_profit, "day": True}
-    rows, value = [], cash
-    for k, d in enumerate(sessions, 1):
-        say(f"Trading day {k}/{len(sessions)} ({d})...")
+    tr = pd.concat([data["High"] - data["Low"], (data["High"] - close.shift()).abs(),
+                    (data["Low"] - close.shift()).abs()]).groupby(level=0).max()
+    atr_pct = tr.rolling(14).mean() / close                    # row d uses days up to d only
+    days = {}
+    for d in sessions:
         prev = adj.index[adj.index < pd.Timestamp(d)][-1]          # last close before today
         ranked = rank_asof(prev, tickers, close, adj, frames, sigs, 10e9, weights)[0]
-        top = basket(ranked)
         day_bars = bars[bars.index.date == d]
         # a bar stamped 09:30 closes at 09:35: its close is the 09:35 price, as in the live test
-        times = [f"{(t + pd.Timedelta(minutes=5)):%H:%M}" for t in day_bars.index]
+        steps = [(f"{(t + pd.Timedelta(minutes=5)):%H:%M}", {k: float(v) for k, v in row.items() if pd.notna(v)})
+                 for t, row in day_bars.iterrows()]
+        days[d] = {"order": list(ranked.index), "top": basket(ranked),
+                   "atr": atr_pct.loc[prev].dropna().to_dict(),
+                   "steps": [(w, pr) for w, pr in steps if "09:35" <= w <= "15:55"]}
+    return days
+
+
+def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=None, sessions=None):
+    """Replay day-trade rules on 5-minute bars, with no peeking: each morning's ranking
+    uses only the day before's close and SEC figures filed by then; during the day each
+    decision sees only finished bars. Money carries over. `sessions` picks the days
+    (default: the last `days`). rules (see DAY_RULES): stop % or atr multiple (stop =
+    atr x the stock's daily swing), trail, tp (None = no take-profit), refill
+    "next"/"spy"/"none", overnight (keep holdings instead of selling at 15:55).
+    Returns (days_df, trades_df, summary)."""
+    r = {**DAY_RULES, **(rules or {})}
+    data = data or replay_data(contact, say)
+    sessions = sessions or sorted(data)[-days:]
+    test = {"cash": cash, "positions": {}, "trades": [], "stop_pct": r["stop"], "take_profit": r["tp"],
+            "day": True, "trail": r["trail"], "refill": r["refill"]}
+    rows, value, spy_prev = [], cash, None
+    for k, d in enumerate(sessions, 1):
+        say(f"Trading day {k}/{len(sessions)} ({d})...")
+        day = data[d]
+        top = day["top"]
         start_value, n0 = value, len(test["trades"])
-        test.update(cash=value, positions={}, queue=[t for t in ranked.index if t not in top])
+        test["stops"] = {t: r["atr"] * a for t, a in day["atr"].items()} if r["atr"] else {}
+        test["queue"] = [t for t in day["order"] if t not in top]
         spy_in = spy_out = top_in = end_prices = None
         stamped = n0
-        for when, (_, row) in zip(times, day_bars.iterrows()):
-            if when < "09:35" or when > "15:55":
-                continue
-            prices = {t: float(v) for t, v in row.items() if pd.notna(v)}
+        for when, prices in day["steps"]:
             if when == "09:35":
                 if not top or not all(t in prices for t in top):
                     break                                          # no clean open: sit out
-                _buy_even(test, top, prices)
+                want = [t for t in top if t not in test["positions"]]
+                if want and test["cash"] >= min(prices[t] for t in want):
+                    _buy_even(test, want, prices)
                 spy_in, top_in = prices.get(BENCH), {t: prices[t] for t in top}
             else:
                 _auto_sell(test, prices)
             if when == "15:55":
-                for t, pos in list(test["positions"].items()):
-                    if t in prices:
-                        _trade(test, t, "SELL", pos["shares"], prices[t], "day ended")
+                if not r["overnight"]:
+                    for t, pos in list(test["positions"].items()):
+                        if t in prices:
+                            _trade(test, t, "SELL", pos["shares"], prices[t], "day ended")
                 spy_out, end_prices = prices.get(BENCH), prices
             for x in test["trades"][stamped:]:                    # bar time, not the clock
                 x["time"] = f"{d} {when}"
             stamped = len(test["trades"])
-        value = test["cash"] + sum(p["shares"] * p["cost"] for p in test["positions"].values())
-        top_ret = (sum(end_prices[t] / top_in[t] - 1 for t in top_in if t in end_prices) / len(top_in)
+        last = end_prices or {}
+        value = test["cash"] + sum(p["shares"] * last.get(t, p["cost"]) for t, p in test["positions"].items())
+        top_ret = (sum(last[t] / top_in[t] - 1 for t in top_in if t in last) / len(top_in)
                    if top_in and end_prices else 0.0)
         rows.append({"date": d, "bought": " ".join(top), "trades": len(test["trades"]) - n0,
                      "value": round(value, 2), "day_ret": value / start_value - 1,
                      "top5_hold_ret": top_ret,
-                     "spy_ret": spy_out / spy_in - 1 if spy_in and spy_out else 0.0})
+                     "spy_ret": spy_out / spy_in - 1 if spy_in and spy_out else 0.0,
+                     "spy_full_ret": spy_out / (spy_prev or spy_in) - 1 if spy_in and spy_out else 0.0})
+        spy_prev = spy_out or spy_prev
     days_df = pd.DataFrame(rows).set_index("date")
     trades = pd.DataFrame(test["trades"])
-    g = lambda r: float((1 + r).prod())
+    g = lambda col: float((1 + days_df[col]).prod())
     sells = trades[(trades["side"] == "SELL")] if len(trades) else trades
-    summary = {"days": len(days_df), "start": cash, "end": value,
-               "growth": {"Day trading (these rules)": g(days_df["day_ret"]),
-                          "Top 5 held all day, no auto-sell": g(days_df["top5_hold_ret"]),
-                          f"{BENCH}, same hours": g(days_df["spy_ret"])},
+    summary = {"days": len(days_df), "start": cash, "end": value, "rules": r,
+               "growth": {"Day trading (these rules)": g("day_ret"),
+                          "Top 5 held all day, no auto-sell": g("top5_hold_ret"),
+                          f"{BENCH}, same hours": g("spy_ret"),
+                          f"{BENCH}, held throughout": g("spy_full_ret")},
+               "worst_day": float(days_df["day_ret"].min()),
                "up_days": int((days_df["day_ret"] > 0).sum()),
                "beat_spy_days": int((days_df["day_ret"] > days_df["spy_ret"]).sum()),
                "trades": len(trades), "wins": int((sells["pnl"] > 0).sum()) if len(sells) else 0,
@@ -1994,11 +2036,11 @@ def replay_lines(days_df, summary):
 def cmd_practice(a):
     day = a.action in ("day", "replay")
     stop = a.stop if a.stop is not None else 0.02 if day else 0.15
-    tp = a.take_profit if a.take_profit is not None or not day else 0.03
+    tp = a.take_profit if a.take_profit is not None or not day else DAY_RULES["tp"]
     if a.action == "replay":
         try:
-            days_df, trades, summary = day_replay(a.days, a.cash, stop, tp, load_state().get("contact"),
-                                                  lambda m: print("  " + m, flush=True))
+            days_df, trades, summary = day_replay(a.days, a.cash, {"stop": stop, "tp": tp},
+                                                  load_state().get("contact"), lambda m: print("  " + m, flush=True))
         except ValueError as e:
             sys.exit(str(e))
         print("\n" + "\n".join(replay_lines(days_df, summary)))
@@ -2010,7 +2052,8 @@ def cmd_practice(a):
         if a.action in ("start", "day"):
             test = start_practice(a.args, a.cash, a.days, stop, tp, follow=a.follow, day=day)
             if day:
-                print(f"Day test {test['id']}: sells at -{stop:.0%} / +{tp:.0%}, ends {test['end'][11:]} "
+                print(f"Day test {test['id']}: sells a stock {stop:.0%} below its highest price today"
+                      + (f" or {tp:.0%} above cost" if tp else "") + f", cash goes to SPY; ends {test['end'][11:]} "
                       "your time. Ctrl+C stops watching; the app's Practice tab keeps it going.\n")
                 test = run_day(test)
             else:
@@ -2142,7 +2185,7 @@ def main():
     p.add_argument("--days", type=int, default=30, help="how long the test runs; replay: trading days back (default 30)")
     p.add_argument("--csv", help="replay: save every trade to this CSV file")
     p.add_argument("--stop", type=float, help="auto-sell this far below cost (default 0.15; day 0.02)")
-    p.add_argument("--take-profit", type=float, help="auto-sell this far above cost, e.g. 0.3 (day default 0.03)")
+    p.add_argument("--take-profit", type=float, help="auto-sell this far above cost, e.g. 0.3 (day: none)")
     p.add_argument("--follow", action="store_true",
                    help="switch to the current top 5 every 30 days (no tickers = today's top 5)")
     p.set_defaults(func=cmd_practice)

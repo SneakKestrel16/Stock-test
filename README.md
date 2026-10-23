@@ -44,6 +44,14 @@ use the shortcut. Tabs:
   no auto-sells: -3.7%. SPY over the same hours: -0.6%. The 2% stop-loss fired
   27 times, the 3% take-profit only 6, so the auto-sells mostly locked in small
   losses. Day trading these picks lost money in this test.
+  **Tuning (2026-10-24):** 144 rule sets chosen on the first 30 of Yahoo's 60
+  days, judged on the last 30. Kept, because each won on both halves: a
+  trailing stop (2% below the day's high), no take-profit, and sale money into
+  SPY. Together: +$76 per $10,000 on the unseen days, still -3.7%. Dropped:
+  stops sized to volatility and wider fixed stops (lost on unseen days). The
+  best set overall held overnight (5% trailing stop, no take-profit):
+  $10,831 on the unseen days vs SPY $10,016, but that is swing trading, not
+  day trading, and 30 days is a small test.
 - **Watchlist**, **History**, **Track record** (your past picks vs SPY),
   **Backtest** (the pick replayed over 10 past years) and **Settings** (SEC
   email, shortcut, light/dark colours, accent colour, text size, and an

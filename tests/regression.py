@@ -72,7 +72,7 @@ assert len(st.position_alerts("X", {"bought": 80, "added": "x"}, flat)) == 1
 print("ok holding period")
 
 # day test: top 5 from today's ranking, ends today, each stop / take-profit sale's money
-# buys the next-ranked stock (fake prices jump +-25%, so both fire)
+# goes to SPY (fake prices jump +-25%, so stops fire)
 real_close = st.market_close_today
 st.market_close_today = lambda: datetime.now() + timedelta(hours=1)
 real_screen, st.screen = st.screen, lambda *a, **k: (pd.DataFrame(index=st.DEFAULT_TICKERS[:12]), [])
@@ -80,7 +80,7 @@ day = st.start_practice([], 10000, 1, 0.02, 0.03, day=True)
 assert len(day["positions"]) == 5 and day["queue"] and day["end"][:10] == f"{date.today()}"
 day = next(x for x in st.update_practice() if x["id"] == day["id"])
 sells = [x for x in day["trades"] if x["side"] == "SELL"]
-refills = [x for x in day["trades"] if x["reason"] == "next in ranking"]
+refills = [x for x in day["trades"] if x["reason"] == "parked in SPY"]     # DAY_RULES refill "spy"
 assert sells and refills and day["cash"] >= 0
 tr = day["trades"]
 for i, b in enumerate(tr):                 # every refill follows the sale that paid for it
@@ -116,11 +116,16 @@ print("ok market calendar")
 
 # day replay: trades only between 09:35 and 15:55, nothing held overnight, money compounds
 st.save_state({**st.load_state(), "contact": "a@b.c"})
-rd, rt, rs = st.day_replay(5, 10000, 0.02, 0.03, "a@b.c", say=lambda m: None)
+rdata = st.replay_data("a@b.c", say=lambda m: None)
+rd, rt, rs = st.day_replay(5, 10000, None, data=rdata, say=lambda m: None)
 assert len(rd) == 5 and rt["time"].str[11:].between("09:35", "15:55").all()
 assert abs(10000 * (1 + rd["day_ret"]).prod() - rs["end"]) < 0.01
 last = rt.groupby(rt["time"].str[:10])
 assert all((g["side"] == "SELL").iloc[-1] for _, g in last)
+for rules in ({"atr": 2, "trail": True, "tp": None, "refill": "spy"}, {"overnight": True, "refill": "none"}):
+    vd, vt, vs = st.day_replay(5, 10000, rules, data=rdata, say=lambda m: None)
+    assert abs(10000 * (1 + vd["day_ret"]).prod() - vs["end"]) < 0.01 and (vt["side"] == "BUY").any()
+assert "next in ranking" not in set(vt["reason"])
 print("ok day replay")
 
 # GUI: an error in a result callback must not stop later results; a stock added while

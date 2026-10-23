@@ -46,7 +46,7 @@ def fake_download(tickers, start=None, auto_adjust=True, actions=False, interval
     n=len(pd.bdate_range(start, pd.Timestamp.today())) if start is not None else 275
     idx=pd.bdate_range(end=pd.Timestamp.today(), periods=n)
     close=pd.DataFrame({t:series(n, random.uniform(-0.0003,0.0009)).values for t in tickers},index=idx)
-    out={"Close":close}
+    out={"Close":close,"High":close*1.01,"Low":close*0.99}
     if not auto_adjust: out["Adj Close"]=close*1.0
     if actions:
         sp=pd.DataFrame(0.0,index=idx,columns=tickers); sp.iloc[n//2,0]=2.0; out["Stock Splits"]=sp

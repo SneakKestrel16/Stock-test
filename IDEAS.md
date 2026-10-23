@@ -235,3 +235,27 @@ own, options/margin anything (long-only rule), real-time streaming quotes
 
 **Remove?** Nothing removed. The weakest feature is the analyst target line:
 targets lag price and the backtest can't test them. It stays as context only.
+
+## Day-trade rule tuning (2026-10-24)
+
+`practice replay` on Yahoo's 60 days of 5-minute bars (2026-07-31 to 2026-10-23),
+64-stock list, $10,000. 144 rule sets ranked on the first 30 sessions (train),
+then run once on the last 30 (test). Only the best-on-train set's test number is
+a fair out-of-sample result; the rest are context.
+
+| Rules | Train | Test |
+|---|---|---|
+| Old day rules (2% stop, 3% take-profit, refill next-ranked) | $9,929 | $9,553 |
+| New day rules (2% trailing stop, no take-profit, refill SPY) | $9,953 | $9,629 |
+| Top 5 held 9:35-15:55, no auto-sell | $9,947 | $9,629 |
+| SPY same hours / held throughout | $10,041 / $10,250 | $9,943 / $10,016 |
+| Best on train: 5% trailing stop, no take-profit, refill next, **hold overnight** | $10,781 | **$10,831** |
+
+One fix at a time (setting chosen on train): volatility stop (1x ATR) +29 / -142,
+wider 3% stop +9 / -100, trailing +2 / +16, no take-profit +70 / +37, refill SPY
++34 / +67, hold overnight -224 / +960 (train / test, vs old rules). Kept the
+three that won both. Selection bias: 144 sets tried on 30 days, so the train
+winner's edge is partly luck; its test result is the honest number.
+
+Idea: a "swing" practice mode with the best-on-train rules (hold overnight,
+5% trailing stop), tested forward in real time before trusting it.
