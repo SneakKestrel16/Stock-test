@@ -1,5 +1,5 @@
 """Open the desktop app with fake_run's offline data. Numbers are made up.
-Set USERPROFILE (Windows) or HOME to a scratch folder to keep your real watchlist safe."""
+Runs in a throwaway data folder, so your real watchlist and journal are untouched."""
 import runpy
 from pathlib import Path
 

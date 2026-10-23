@@ -34,6 +34,9 @@ only show you things that happened since the last time you checked.
 import argparse
 import io
 import json
+import re
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 import sys
 import threading
 import time
@@ -973,18 +976,25 @@ def fact_asof(f, day, years_back=0):
 
 
 def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, progress=None,
-             sector_neutral=False, market_filter=False, sector_cap=None, every=1):
+             sector_neutral=False, market_filter=False, sector_cap=None, every=1, universe="list"):
     """Replay `pick` at every month-end of the past `years`, using only data public
     at the time, and hold the pick for one month. Returns (monthly_df, summary, info).
-    market_filter: hold cash for the month when SPY is below its 200-day average."""
+    market_filter: hold cash for the month when SPY is below its 200-day average.
+    universe: "list" = DEFAULT_TICKERS (today's winners: hindsight); "sp500" = the
+    S&P 500 members as listed at each month-end."""
     if not contact:
         raise ValueError("The backtest needs old company reports from the SEC. Set your SEC "
                          "contact email first (Settings tab, or: setup --contact you@example.com).")
-    tickers = tickers or DEFAULT_TICKERS
     weights = weights or parse_weights(None)
     say = progress or (lambda msg: print("  " + msg))
-    say("Downloading price history...")
     start = pd.Timestamp.today().normalize() - pd.DateOffset(years=years, months=14)
+    members = None
+    if universe == "sp500":
+        months = pd.date_range(start + pd.DateOffset(months=13), pd.Timestamp.today(), freq="ME")
+        members = sp500_members(list(months) + [pd.Timestamp.today()], contact, say)
+        tickers = sorted({t for v in members.values() for t in v})
+    tickers = tickers or DEFAULT_TICKERS
+    say(f"Downloading price history for {len(tickers)} stocks...")
     data = naive(yf.download(tickers + [BENCH], start=start, auto_adjust=False, actions=True,
                              progress=False, threads=True))
     close, adj = data["Close"], data["Adj Close"]     # Close: for company value; Adj: for returns
@@ -1011,8 +1021,11 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
     rows, unvalued, held = [], {}, []
     for k, (d, d2) in enumerate(zip(month_ends[:-1], month_ends[1:]), 1):
         say(f"Replaying month {k}/{len(month_ends) - 1} ({d:%Y-%m})...")
+        pool = [t for t in (members.get(f"{d:%Y-%m}", []) if members else tickers) if t in adj.columns]
+        n_members = len(members.get(f"{d:%Y-%m}", [])) if members else len(tickers)
+        priced = [t for t in pool if pd.notna(adj.at[d, t])]
         feats = []
-        for t in tickers:
+        for t in priced:
             fr = frames.get(t, {})
             get = lambda item, back=0: fact_asof(fr.get(item), d, back)
             mcap = close.at[d, t] * get("shares")
@@ -1031,8 +1044,10 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
                 "mom_12_1": mom.at[d, t], "ret_6m": ret6.at[d, t],
                 "last": adj.at[d, t], "ma200": ma200.at[d, t]})
         df = pd.DataFrame(feats).set_index("ticker")
-        for t in df.index[df["marketCap"].isna() | df["forwardPE"].isna()]:
+        bad = df["marketCap"].isna() | df["forwardPE"].isna()
+        for t in df.index[bad]:
             unvalued[t] = unvalued.get(t, 0) + 1
+        coverage = (n_members, len(priced), int((~bad).sum()))
         df, _ = apply_filters(df, min_mcap)
         if len(df):
             df = df.join(score(df, weights, sectors)).sort_values("score", ascending=False)
@@ -1046,7 +1061,8 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
         rows.append({"date": d, "pick": top[0] if top else "(cash)", "passed": len(df),
                      "pick_ret": fwd[top[0]] if top else 0.0,
                      "top5_ret": fwd[top].mean() if top else 0.0,
-                     "spy_ret": fwd[BENCH], "all_ret": fwd[tickers].mean()})
+                     "spy_ret": fwd[BENCH], "all_ret": fwd[priced].mean(),
+                     "members": coverage[0], "priced": coverage[1], "valued": coverage[2]})
     m = pd.DataFrame(rows).set_index("date")
 
     def perf(r):
@@ -1054,13 +1070,58 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
         return {"growth": g.iloc[-1], "cagr": g.iloc[-1] ** (12 / len(r)) - 1,
                 "worst": (g / g.cummax() - 1).min()}
     lines = [("Top pick", "pick_ret"), ("Top 5 average", "top5_ret"),
-             (f"{BENCH} (whole market)", "spy_ret"), (f"All {len(tickers)} stocks, equal", "all_ret")]
+             (f"{BENCH} (whole market)", "spy_ret"),
+             ("S&P 500 members, equal" if members else f"All {len(tickers)} stocks, equal", "all_ret")]
     summary = {name: {**perf(m[col]), "col": col} for name, col in lines}
     info = {"months": len(m), "beat_spy": int((m["pick_ret"] > m["spy_ret"]).sum()),
             "beat_all": int((m["pick_ret"] > m["all_ret"]).sum()),
             "cash": int((m["passed"] == 0).sum()), "start": m.index[0], "end": month_ends[-1],
-            "unvalued": dict(sorted(unvalued.items(), key=lambda kv: -kv[1]))}
+            "unvalued": dict(sorted(unvalued.items(), key=lambda kv: -kv[1])),
+            "universe": universe,
+            "coverage": (m["members"].mean(), m["priced"].mean(), m["valued"].mean())}
     return m, summary, info
+
+
+WIKI_UA = {"User-Agent": "StockTracker/1.0 (personal research tool)"}   # no email: that only goes to sec.gov
+SP500_FILE = HOME / "sp500_history.json"
+
+
+def sp500_members(days, contact, say=print):
+    """S&P 500 members at each date, from the Wikipedia list as it stood then (its
+    page history), so a backtest doesn't only choose among today's winners. Tickers
+    are mapped to today's symbol through the CIK column (FB -> META). Past months
+    are cached for good; the current month is refreshed. Returns {"YYYY-MM": [tickers]}."""
+    cache = json.loads(SP500_FILE.read_text()) if SP500_FILE.exists() else {}
+    now_key = f"{pd.Timestamp.today():%Y-%m}"
+    headers = {"User-Agent": f"stock_tracker personal research {contact}"}
+    sec_cik("MSFT", headers)                              # makes sure CIK_FILE is fresh
+    by_cik = {}
+    for row in json.loads(CIK_FILE.read_text()).values():
+        by_cik.setdefault(int(row["cik_str"]), row["ticker"].upper().replace(".", "-"))
+    for i, d in enumerate(days, 1):
+        key = f"{d:%Y-%m}"
+        if key in cache and key != now_key:
+            continue
+        say(f"S&P 500 list as of {key} ({i}/{len(days)})...")
+        r = requests.get("https://en.wikipedia.org/w/api.php", headers=WIKI_UA, timeout=30, params={
+            "action": "query", "prop": "revisions", "titles": "List of S&P 500 companies",
+            "rvlimit": 1, "rvstart": f"{d:%Y-%m-%d}T23:59:59Z", "rvdir": "older",
+            "rvprop": "ids", "format": "json"})
+        rev = next(iter(r.json()["query"]["pages"].values()))["revisions"][0]["revid"]
+        html = requests.get("https://en.wikipedia.org/w/index.php", headers=WIKI_UA, timeout=60,
+                            params={"oldid": rev}).text
+        table = next(t for t in pd.read_html(io.StringIO(html)) if any("ymbol" in str(c) for c in t.columns))
+        sym = next(c for c in table.columns if "ymbol" in str(c))
+        cik = next((c for c in table.columns if str(c).strip().upper() == "CIK"), None)
+        out = set()
+        for _, row in table.iterrows():
+            t = str(row[sym]).strip().upper().replace(".", "-")
+            c = pd.to_numeric(row[cik], errors="coerce") if cik is not None else None
+            out.add(by_cik.get(int(c), t) if c is not None and pd.notna(c) else t)
+        cache[key] = sorted(out)
+        write_json(SP500_FILE, cache)
+        time.sleep(0.5)                                   # be gentle with Wikipedia
+    return {f"{d:%Y-%m}": cache[f"{d:%Y-%m}"] for d in days if f"{d:%Y-%m}" in cache}
 
 
 def cmd_track(a):
@@ -1099,7 +1160,13 @@ def backtest_lines(summary, info):
               f"and the equal mix in {info['beat_all']}."]
     if info["cash"]:
         lines.append(f"No stock passed the filters in {info['cash']} months (held cash).")
-    if info["unvalued"]:
+    if info.get("universe") == "sp500":
+        n, priced, valued = info["coverage"]
+        lines += ["", f"Stock list: S&P 500 members at each month-end (avg {n:.0f}).",
+                  f"With price data: {priced:.0f}; with enough SEC data to value: {valued:.0f}.",
+                  "Members missing price data are mostly companies later bought out or",
+                  "delisted (Yahoo drops them), so some hindsight remains."]
+    elif info["unvalued"]:
         lines += ["Too little SEC data to value these, so they sat out (months):",
                   ", ".join(f"{t} ({n})" for t, n in info["unvalued"].items())]
     return lines
@@ -1110,7 +1177,7 @@ def cmd_backtest(a):
         m, summary, info = backtest(years=a.years, min_mcap=a.min_mcap,
                                     contact=load_state().get("contact"),
                                     sector_neutral=a.sector, market_filter=a.market_filter,
-                                    sector_cap=a.sector_cap, every=a.every)
+                                    sector_cap=a.sector_cap, every=a.every, universe=a.universe)
     except ValueError as e:
         sys.exit(str(e))
     print()
@@ -1321,6 +1388,105 @@ def company_checks(ticker, watchlist=None):
                share_count, stop, overlap, quality):
         check(fn)
     return out
+
+
+def short_name(name):
+    """'Chevron Corporation' -> 'Chevron', for searching news."""
+    words = [w for w in str(name).replace(",", "").split()
+             if w.lower().strip(".") not in {"inc", "corp", "corporation", "co", "company", "ltd",
+                                             "plc", "holdings", "group", "the", "class", "a", "b"}]
+    return " ".join(words[:3]) or str(name)
+
+
+def web_news(query, days=14, limit=15):
+    """Recent headlines from across the web (Google News RSS search; free, no key,
+    nothing personal sent). Returns [{date, title, source, url}], newest first."""
+    r = requests.get("https://news.google.com/rss/search", timeout=20, params={
+        "q": f"{query} when:{days}d", "hl": "en-US", "gl": "US", "ceid": "US:en"})
+    r.raise_for_status()
+    out = []
+    for it in ET.fromstring(r.content).findall("./channel/item"):
+        try:
+            when = parsedate_to_datetime(it.findtext("pubDate"))
+        except (TypeError, ValueError):
+            when = None
+        title = it.findtext("title") or ""
+        if NEWS_FILLER.search(title):
+            continue
+        out.append({"date": iso_day(when), "title": title,
+                    "source": it.findtext("source") or "", "url": it.findtext("link") or ""})
+    return sorted(out, key=lambda x: x["date"], reverse=True)[:limit]
+
+
+# Auto-written "fund X bought/sold shares" items: many per day, say nothing about the company.
+NEWS_FILLER = re.compile(r"\b(Shares|Stock|Stake|Position|Holdings) (Sold|Bought|Boosted|Lowered|Raised|"
+                         r"Trimmed|Acquired|Purchased|Increased|Decreased|Cut|Grown|Reduced)\b"
+                         r"|\b(Sells|Buys|Acquires|Purchases|Trims|Boosts|Lowers|Raises) [\d,]+ Shares\b"
+                         r"|Interactive Stock Chart|Price, News, Quote|Live Price|Price Today"
+                         r"|Stock Forecast and Price Target", re.I)   # quote pages, not news
+
+
+def stock_detail(ticker, contact=None, watchlist=None, period="5y"):
+    """Everything about one stock for the Stock tab / `lookup` command."""
+    t = ticker.upper()
+    tk = yf.Ticker(t)
+    try:
+        info = tk.info or {}
+    except Exception:
+        info = {}
+    h, stats, uptrend = history_stats(t, period)          # ValueError for unknown tickers
+    name = info.get("shortName") or info.get("longName") or t
+    d = {"ticker": t, "name": name, "info": info, "hist": h, "stats": stats, "uptrend": uptrend}
+    d["yahoo_news"] = news_events(tk)[:15]
+    try:
+        d["web_news"] = web_news(f'"{short_name(name)}" stock')
+    except Exception:
+        d["web_news"] = []
+    d["checks"] = company_checks(t, watchlist)
+    d["filings"], d["filings_note"] = sec_events(t, contact, str(date.today() - timedelta(days=365)))
+    return d
+
+
+def detail_facts(info):
+    """Key numbers from Yahoo's info as (label, text) pairs."""
+    g = info.get
+    div = g("dividendYield")
+    return [("Price", money(g("currentPrice") or g("regularMarketPrice"))),
+            ("Market value", f"${g('marketCap') / 1e9:,.1f}B" if g("marketCap") else "-"),
+            ("Sector / industry", f"{g('sector', '-')} / {g('industry', '-')}"),
+            ("P/E (last 12 months)", f"{g('trailingPE'):.1f}" if g("trailingPE") else "-"),
+            ("P/E (next 12 months)", f"{g('forwardPE'):.1f}" if g("forwardPE") else "-"),
+            ("52-week range", f"{money(g('fiftyTwoWeekLow'))} - {money(g('fiftyTwoWeekHigh'))}"),
+            ("Dividend yield", f"{div:.2f}%" if div else "none"),       # Yahoo now gives percent
+            ("Profit margin", pct(g("profitMargins"))), ("Revenue growth", pct(g("revenueGrowth"))),
+            ("Debt / equity", f"{g('debtToEquity'):.0f}%" if g("debtToEquity") else "-"),
+            ("Beta (swing vs market)", f"{g('beta'):.2f}" if g("beta") else "-"),
+            ("Analyst target", f"{money(g('targetMeanPrice'))} ({g('recommendationKey') or 'n/a'})"),
+            ("Employees", f"{g('fullTimeEmployees'):,}" if g("fullTimeEmployees") else "-")]
+
+
+def cmd_lookup(a):
+    try:
+        d = stock_detail(a.ticker, load_state().get("contact"), list(load_state()["watchlist"]))
+    except ValueError as e:
+        sys.exit(str(e))
+    print(f"{d['ticker']}  {d['name']}\n")
+    for label, text in detail_facts(d["info"]):
+        print(f"  {label:24} {text}")
+    s = d["stats"]
+    print(f"\n  Returns: " + ", ".join(f"{k} {pct(v)}" for k, v in s["returns"]))
+    print(f"  Worst drop {pct(s['worst_drop'])}; {'uptrend' if d['uptrend'] else 'downtrend'} "
+          f"(200-day average {money(s['ma200'])})")
+    summary = d["info"].get("longBusinessSummary")
+    if summary:
+        print("\n  " + summary[:600] + ("..." if len(summary) > 600 else ""))
+    print_checks("\nChecklist", d["checks"], "")
+    print("News from the web (Google News):")
+    for n in d["web_news"][:10]:
+        print(f"  {n['date']}  {n['title'][:100]}")
+    print("\nSEC filings (1 year):" + (f" {d['filings_note']}" if d["filings_note"] else ""))
+    for e in d["filings"][:10]:
+        print(f"  {'!!' if e.get('flag') else '  '} {e['date']}  {e['kind']:10} {e['text']}")
 
 
 def cmd_market(a):
@@ -1642,6 +1808,8 @@ def main():
                    help="hold cash when SPY is below its 200-day average (tested 2026-10: did worse)")
     p.add_argument("--sector-cap", type=int, help="at most N per sector in the top 5 (tested 2026-10: did worse)")
     p.add_argument("--every", type=int, default=1, help="re-pick every N months (tested 2026-10: monthly best)")
+    p.add_argument("--universe", choices=["list", "sp500"], default="list",
+                   help="list = 64 of today's big names (hindsight); sp500 = S&P 500 members at each date")
     p.set_defaults(func=cmd_backtest)
 
     sub.add_parser("daily", help="unattended: journal a pick, check watchlist, update practice"
@@ -1649,6 +1817,10 @@ def main():
 
     sub.add_parser("market", help="market weather: trend, fear, recession and credit signals"
                    ).set_defaults(func=cmd_market)
+
+    p = sub.add_parser("lookup", help="everything about one stock: numbers, history, news, filings")
+    p.add_argument("ticker")
+    p.set_defaults(func=cmd_lookup)
 
     p = sub.add_parser("check", help="extra checklist for one company (forecasts, insiders...)")
     p.add_argument("ticker")

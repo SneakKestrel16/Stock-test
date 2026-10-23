@@ -1,6 +1,8 @@
-import sys, random, json, numpy as np, pandas as pd
+import os, sys, tempfile, random, json, numpy as np, pandas as pd
 from datetime import date, timedelta
 from pathlib import Path; sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+if "stock_tracker" not in sys.modules and not os.environ.get("FAKE_KEEP_HOME"):   # fake prices must never reach the real journal
+    os.environ["USERPROFILE"] = os.environ["HOME"] = tempfile.mkdtemp(prefix="stfake-")
 import stock_tracker as s
 random.seed(3); np.random.seed(3)
 def series(n, drift):
@@ -50,11 +52,16 @@ class R:
     def __init__(s_, d): s_.d=d; s_.text=json.dumps(d)
     def raise_for_status(s_): pass
     def json(s_): return s_.d
-def fake_get(url, headers=None, timeout=None):
+def fake_get(url, headers=None, timeout=None, **kw):
     if "fred.stlouisfed.org" in url:
         r=R({}); days=pd.date_range(end=pd.Timestamp.today(), periods=200)
         r.text="observation_date,X\n"+"\n".join(f"{d:%Y-%m-%d},{random.uniform(-0.5,4):.2f}" for d in days)
         return r
+    if "news.google.com" in url:
+        r=R({}); items="".join(f"<item><title>{t} {i}</title><link>https://example.com/n{i}</link>"
+            f"<pubDate>Mon, 19 Oct 2026 1{i}:00:00 GMT</pubDate><source>Example News</source></item>"
+            for i,t in enumerate(["Company beats forecasts","Fund LLC Shares Sold by X","New product"]))
+        r.content=f"<rss><channel>{items}</channel></rss>".encode(); return r
     assert "@" in headers["User-Agent"]
     if "company_tickers" in url:
         return R({str(i):{"cik_str":789019 if t=="MSFT" else 1000+i,"ticker":t,"title":t}

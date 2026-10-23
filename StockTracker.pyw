@@ -27,52 +27,96 @@ PACKAGES = {"yfinance": "yfinance", "pandas": "pandas", "requests": "requests",
             "matplotlib": "matplotlib"}
 
 
-PALETTE = {"bg": "#f4f6fb", "card": "#ffffff", "accent": "#2563eb", "accent_dark": "#1d4ed8",
-           "text": "#111827", "muted": "#6b7280", "line": "#dfe3ec", "stripe": "#f7f9fc",
-           "good": "#15803d", "warn": "#b45309", "bad": "#b91c1c", "info": "#6b7280"}
+THEMES = {
+    "Light": {"bg": "#f4f6fb", "card": "#ffffff", "text": "#111827", "muted": "#6b7280",
+              "line": "#dfe3ec", "stripe": "#f7f9fc", "tab": "#e6eaf2", "head": "#eef1f7",
+              "hover": "#e8eefc", "sel": "#dbe7fe", "flagbg": "#fee2e2",
+              "good": "#15803d", "warn": "#b45309", "bad": "#b91c1c", "info": "#6b7280"},
+    "Dark": {"bg": "#111827", "card": "#1f2937", "text": "#f3f4f6", "muted": "#9ca3af",
+             "line": "#374151", "stripe": "#18212f", "tab": "#1b2433", "head": "#273244",
+             "hover": "#2b3a52", "sel": "#1e3a8a", "flagbg": "#3f1d1d",
+             "good": "#4ade80", "warn": "#fbbf24", "bad": "#f87171", "info": "#9ca3af"},
+}
+ACCENTS = {"Blue": ("#2563eb", "#1d4ed8"), "Green": ("#059669", "#047857"),
+           "Purple": ("#7c3aed", "#6d28d9"), "Orange": ("#ea580c", "#c2410c"),
+           "Pink": ("#db2777", "#be185d")}
+TEXT_SIZES = {"Normal": 10, "Large": 12, "Extra large": 14}
+PALETTE = {}
 
 
-def apply_style(root):
-    """Light, flat theme on ttk's 'clam' (ships with Python; no extra installs)."""
+def apply_style(root, prefs=None):
+    """Flat theme on ttk's 'clam' (ships with Python; no extra installs). prefs:
+    {"theme": Light/Dark, "accent": a key of ACCENTS, "size": a key of TEXT_SIZES}."""
+    prefs = prefs or {}
+    PALETTE.clear()
+    PALETTE.update(THEMES.get(prefs.get("theme"), THEMES["Light"]))
+    PALETTE["accent"], PALETTE["accent_dark"] = ACCENTS.get(prefs.get("accent"), ACCENTS["Blue"])
+    n = TEXT_SIZES.get(prefs.get("size"), 10)
+    PALETTE["size"] = n
     p = PALETTE
     s = ttk.Style(root)
     s.theme_use("clam")
     root.configure(background=p["bg"])
-    base = ("Segoe UI", 10)
+    root.option_add("*TCombobox*Listbox.background", p["card"])
+    root.option_add("*TCombobox*Listbox.foreground", p["text"])
+    base, bold = ("Segoe UI", n), ("Segoe UI Semibold", n)
     s.configure(".", background=p["bg"], foreground=p["text"], font=base, bordercolor=p["line"],
-                lightcolor=p["bg"], darkcolor=p["bg"], troughcolor=p["line"])
+                lightcolor=p["bg"], darkcolor=p["bg"], troughcolor=p["line"],
+                fieldbackground=p["card"], insertcolor=p["text"], selectbackground=p["sel"],
+                selectforeground=p["text"])
     s.configure("TLabelframe", background=p["bg"], bordercolor=p["line"], relief="solid")
     s.configure("TLabelframe.Label", background=p["bg"], foreground=p["accent"],
-                font=("Segoe UI Semibold", 11))
+                font=("Segoe UI Semibold", n + 1))
     s.configure("TNotebook", background=p["bg"], borderwidth=0, tabmargins=(0, 4, 0, 0))
-    s.configure("TNotebook.Tab", padding=(16, 7), background="#e6eaf2", foreground=p["muted"],
-                font=("Segoe UI Semibold", 10), borderwidth=0)
+    s.configure("TNotebook.Tab", padding=(14, 7), background=p["tab"], foreground=p["muted"],
+                font=bold, borderwidth=0)
     s.map("TNotebook.Tab", background=[("selected", p["bg"])], foreground=[("selected", p["accent"])])
-    s.configure("TButton", padding=(10, 5), background=p["card"], relief="flat")
-    s.map("TButton", background=[("active", "#e8eefc"), ("disabled", p["bg"])])
+    s.configure("TButton", padding=(10, 5), background=p["card"], foreground=p["text"], relief="flat")
+    s.map("TButton", background=[("active", p["hover"]), ("disabled", p["bg"])],
+          foreground=[("disabled", p["muted"])])
     for name in ("Accent.TButton", "Big.TButton"):
         s.configure(name, background=p["accent"], foreground="white", padding=(16, 8),
-                    font=("Segoe UI Semibold", 11))
-        s.map(name, background=[("active", p["accent_dark"]), ("disabled", "#9db9f5")],
+                    font=("Segoe UI Semibold", n + 1))
+        s.map(name, background=[("active", p["accent_dark"]), ("disabled", p["line"])],
               foreground=[("disabled", "white")])
-    s.configure("TEntry", fieldbackground=p["card"], padding=4)
-    s.configure("TCombobox", fieldbackground=p["card"], padding=3)
-    s.configure("TSpinbox", fieldbackground=p["card"], padding=3)
-    s.configure("Treeview", background=p["card"], fieldbackground=p["card"], rowheight=26,
-                bordercolor=p["line"], font=base)
-    s.configure("Treeview.Heading", background="#eef1f7", foreground=p["text"], relief="flat",
-                font=("Segoe UI Semibold", 10), padding=(4, 5))
-    s.map("Treeview", background=[("selected", "#dbe7fe")], foreground=[("selected", p["text"])])
-    s.configure("Title.TLabel", font=("Segoe UI Semibold", 17), foreground=p["text"])
+    s.configure("TCheckbutton", background=p["bg"], foreground=p["text"])
+    s.configure("TRadiobutton", background=p["bg"], foreground=p["text"])
+    s.configure("TEntry", fieldbackground=p["card"], foreground=p["text"], padding=4)
+    s.configure("TCombobox", fieldbackground=p["card"], foreground=p["text"], padding=3,
+                arrowcolor=p["text"])
+    s.map("TCombobox", fieldbackground=[("readonly", p["card"])], foreground=[("readonly", p["text"])])
+    s.configure("TSpinbox", fieldbackground=p["card"], foreground=p["text"], padding=3, arrowcolor=p["text"])
+    s.configure("Treeview", background=p["card"], fieldbackground=p["card"], foreground=p["text"],
+                rowheight=int(n * 2.6), bordercolor=p["line"], font=base)
+    s.configure("Treeview.Heading", background=p["head"], foreground=p["text"], relief="flat",
+                font=bold, padding=(4, 5))
+    s.map("Treeview", background=[("selected", p["sel"])], foreground=[("selected", p["text"])])
+    s.map("Treeview.Heading", background=[("active", p["hover"])])
+    s.configure("Title.TLabel", font=("Segoe UI Semibold", n + 7), foreground=p["text"])
     s.configure("Muted.TLabel", foreground=p["muted"])
-    s.configure("Bold.TLabel", font=("Segoe UI Semibold", 10))
-    s.configure("Step.TLabel", font=("Segoe UI Semibold", 12), foreground=p["accent"])
-    s.configure("Card.TLabel", font=("Consolas", 10), background=p["bg"])
+    s.configure("Bold.TLabel", font=bold)
+    s.configure("Step.TLabel", font=("Segoe UI Semibold", n + 2), foreground=p["accent"])
+    s.configure("Card.TLabel", font=("Consolas", n), background=p["bg"])
     for mood in ("good", "warn", "bad", "info"):
         s.configure(f"{mood.title()}.TLabel", foreground=p[mood])
-    s.configure("Status.TFrame", background="#e6eaf2")
-    s.configure("Status.TLabel", background="#e6eaf2", foreground=p["muted"])
+    s.configure("Status.TFrame", background=p["tab"])
+    s.configure("Status.TLabel", background=p["tab"], foreground=p["muted"])
     s.configure("TProgressbar", background=p["accent"])
+    s.configure("Vertical.TScrollbar", background=p["tab"], arrowcolor=p["muted"])
+    import matplotlib
+    matplotlib.rcParams.update({
+        "figure.facecolor": p["card"], "axes.facecolor": p["card"], "savefig.facecolor": p["card"],
+        "text.color": p["text"], "axes.labelcolor": p["text"], "axes.edgecolor": p["line"],
+        "xtick.color": p["muted"], "ytick.color": p["muted"], "grid.color": p["line"],
+        "legend.facecolor": p["card"], "legend.edgecolor": p["line"], "font.size": n - 1})
+
+
+def text_widget_colors():
+    """Options for plain tk.Text widgets so they follow the theme."""
+    p = PALETTE
+    return {"background": p["card"], "foreground": p["text"], "insertbackground": p["text"],
+            "highlightthickness": 1, "highlightbackground": p["line"],
+            "font": ("Consolas", p["size"])}
 
 
 def log_error(text):
@@ -186,7 +230,7 @@ class App:
         root.title("Stock Tracker")
         root.geometry("1220x780")
         root.minsize(980, 620)
-        apply_style(root)
+        apply_style(root, st.load_state().get("prefs"))
 
         head = ttk.Frame(root, padding=(14, 10, 14, 0))
         head.pack(fill="x")
@@ -198,7 +242,7 @@ class App:
         nb.pack(fill="both", expand=True, padx=10, pady=(6, 0))
         self.nb = nb
         self.tabs = {}
-        for name, build in (("Home", self.build_home), ("Pick", self.build_pick),
+        for name, build in (("Home", self.build_home), ("Stock", self.build_stock), ("Pick", self.build_pick),
                             ("Practice", self.build_practice), ("Watchlist", self.build_watch),
                             ("History", self.build_history), ("Track record", self.build_track),
                             ("Backtest", self.build_backtest), ("Settings", self.build_settings)):
@@ -317,13 +361,169 @@ class App:
         ttk.Label(self.weather_box, text=summary, wraplength=500, justify="left").pack(anchor="w", pady=(8, 0))
         self.update_glance()
 
-    def show_checklist(self, ticker, checks):
+    # ------------------------------------------------------------ stock tab
+    def build_stock(self, f):
+        self.nb.add(f, text="Stock")
+        top = ttk.Frame(f)
+        top.pack(fill="x")
+        ttk.Label(top, text="Ticker:").pack(side="left")
+        self.look_ticker = tk.StringVar()
+        e = ttk.Entry(top, textvariable=self.look_ticker, width=10)
+        e.pack(side="left", padx=4)
+        e.bind("<Return>", lambda ev: self.do_lookup())
+        ttk.Button(top, text="Look up", style="Accent.TButton", command=self.do_lookup).pack(side="left")
+        ttk.Label(top, text="  Chart:").pack(side="left")
+        self.look_period = tk.StringVar(value="5y")
+        ttk.Combobox(top, textvariable=self.look_period, values=["6mo", "1y", "2y", "5y", "10y", "max"],
+                     width=5, state="readonly").pack(side="left", padx=4)
+        self.look_btns = []
+        for text, cmd in (("Add to watchlist", self.look_to_watch), ("Practice with it", self.look_to_practice),
+                          ("Open on Yahoo Finance", self.look_open_web)):
+            b = ttk.Button(top, text=text, command=cmd, state="disabled")
+            b.pack(side="left", padx=(6, 0))
+            self.look_btns.append(b)
+        ttk.Label(f, text="Type any US ticker (e.g. AAPL, KO, BRK-B) for its numbers, history, news from "
+                  "Yahoo and the web, SEC filings and the checklist. ~15 seconds.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(4, 6))
+
+        body = ttk.Frame(f)
+        body.pack(fill="both", expand=True)
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=False)
+        self.look_text = tk.Text(left, width=58, wrap="word", relief="flat", padx=10, pady=8,
+                                 **text_widget_colors())
+        self.look_text.pack(fill="both", expand=True)
+        for mood in ("good", "warn", "bad", "info"):
+            self.look_text.tag_configure(mood, foreground=PALETTE[mood])
+        self.look_text.tag_configure("h", font=("Segoe UI Semibold", PALETTE["size"] + 3))
+        self.look_text.tag_configure("muted", foreground=PALETTE["muted"])
+        self.look_text.insert("1.0", "Look up a stock to see its details here.")
+        self.look_text.configure(state="disabled")
+
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        self.look_fig = Figure(figsize=(6, 3.2), dpi=100)
+        self.look_ax = self.look_fig.add_subplot(111)
+        self.look_canvas = FigureCanvasTkAgg(self.look_fig, master=right)
+        self.look_canvas.get_tk_widget().pack(fill="x")
+        tabs = ttk.Notebook(right)
+        tabs.pack(fill="both", expand=True, pady=(8, 0))
+        self.look_trees, self.look_urls = {}, {}
+        for key, title, heads in (("web", "News from the web", ("Date", "Source", "Headline")),
+                                  ("yahoo", "Yahoo news", ("Date", "Source", "Headline")),
+                                  ("sec", "SEC filings", ("Date", "Form", "What"))):
+            fr = ttk.Frame(tabs, padding=4)
+            tabs.add(fr, text=title)
+            tv = self.make_tree(fr, ("date", "src", "text"), heads, (90, 120, 520), stretch_last=True)
+            tv.tag_configure("flag", foreground=PALETTE["bad"])
+            tv.bind("<Double-1>", lambda ev, k=key: self.look_open(k))
+            self.look_trees[key] = tv
+        ttk.Label(right, text="Double-click a row to open it.", style="Muted.TLabel").pack(anchor="w")
+        self.look_data = None
+
+    def do_lookup(self):
+        t = self.look_ticker.get().strip().upper()
+        if not t:
+            return
+        s = st.load_state()
+        period = self.look_period.get()
+        self.run_bg(f"Looking up {t}...", lambda: st.stock_detail(t, s.get("contact"), list(s["watchlist"]),
+                                                                    period), self.lookup_done)
+
+    def lookup_done(self, d):
+        self.look_data = d
+        info, s = d["info"], d["stats"]
+        w = self.look_text
+        w.configure(state="normal")
+        w.delete("1.0", "end")
+        w.insert("end", f"{d['ticker']}  {d['name']}\n", "h")
+        for label, text in st.detail_facts(info):
+            w.insert("end", f"{label:24}", "muted")
+            w.insert("end", f"{text}\n")
+        w.insert("end", "\nReturns  ", "muted")
+        w.insert("end", "  ".join(f"{k} {st.pct(v)}" for k, v in s["returns"]) + "\n")
+        w.insert("end", "Worst drop ", "muted")
+        w.insert("end", f"{st.pct(s['worst_drop'])}   ")
+        w.insert("end", "uptrend\n" if d["uptrend"] else "downtrend\n", "good" if d["uptrend"] else "bad")
+        if info.get("longBusinessSummary"):
+            w.insert("end", "\n" + info["longBusinessSummary"][:700] + "\n", "muted")
+        w.insert("end", "\nChecklist\n", "h")
+        for name, res, mood, why in d["checks"]:
+            w.insert("end", "● ", mood)
+            w.insert("end", f"{name}: {res}\n")
+            w.insert("end", f"   {why}\n", "muted")
+        w.configure(state="disabled")
+
+        h = d["hist"]["Close"]
+        ax = self.look_ax
+        ax.clear()
+        ax.plot(h.index, h, color=PALETTE["accent"], linewidth=1.4, label="Price")
+        ax.plot(h.index, h.rolling(50).mean(), color="#f59e0b", linewidth=1, label="50-day avg")
+        ax.plot(h.index, h.rolling(200).mean(), color=PALETTE["muted"], linewidth=1, label="200-day avg")
+        ax.set_title(f"{d['ticker']} price ({self.look_period.get()})")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+        self.look_fig.tight_layout()
+        self.look_canvas.draw()
+
+        self.look_urls.clear()
+        for key, rows in (("web", [(n["date"], n["source"], n["title"], n["url"], False) for n in d["web_news"]]),
+                          ("yahoo", [(e["date"], e["text"].rsplit("[", 1)[-1].rstrip("]") if "[" in e["text"] else "",
+                                      e["text"].rsplit("  [", 1)[0], e["url"], False) for e in d["yahoo_news"]]),
+                          ("sec", [(e["date"], e["kind"], e["text"], e["url"], e.get("flag"))
+                                   for e in d["filings"]] or [("", "", d["filings_note"] or "None in the last year.",
+                                                                "", False)])):
+            tv = self.look_trees[key]
+            tv.delete(*tv.get_children())
+            for i, (dt, src, text, url, flag) in enumerate(rows):
+                iid = tv.insert("", "end", values=(dt, src, text),
+                                tags=(("flag",) if flag else ()) + (("odd",) if i % 2 else ()))
+                if url:
+                    self.look_urls[(key, iid)] = url
+        for b in self.look_btns:
+            b.configure(state="normal")
+
+    def look_open(self, key):
+        sel = self.look_trees[key].selection()
+        if sel and (key, sel[0]) in self.look_urls:
+            webbrowser.open(self.look_urls[(key, sel[0])])
+
+    def look_to_watch(self):
+        if self.look_data:
+            st.add_to_watchlist(self.look_data["ticker"], keep_existing=True)
+            self.refresh_watchlist()
+            self.status.set(f"{self.look_data['ticker']} added to your watchlist.")
+
+    def look_to_practice(self):
+        if self.look_data:
+            self.p_tickers.set(self.look_data["ticker"])
+            self.p_follow.set(False)
+            self.go("Practice")
+
+    def look_open_web(self):
+        if self.look_data:
+            webbrowser.open(f"https://finance.yahoo.com/quote/{self.look_data['ticker']}")
+
+    def show_checklist(self, ticker, checks, news=()):
         win = tk.Toplevel(self.root)
         win.title(f"Checklist: {ticker}")
-        win.geometry("760x760")
+        win.geometry("1240x780" if news else "760x780")
         win.configure(background=PALETTE["bg"])
         box = ttk.Frame(win, padding=14)
-        box.pack(fill="both", expand=True)
+        box.pack(side="left", fill="both", expand=True)
+        if news:
+            side = ttk.LabelFrame(win, text="News from the web (last 14 days)", padding=10)
+            side.pack(side="left", fill="both", expand=True, padx=(0, 14), pady=14)
+            for n in news[:12]:
+                link = ttk.Label(side, text=f"{n['date']}  {n['title']}", wraplength=420,
+                                 cursor="hand2", style="Bold.TLabel" if n is news[0] else "TLabel")
+                link.pack(anchor="w", pady=3)
+                link.bind("<Button-1>", lambda e, u=n["url"]: webbrowser.open(u))
+            ttk.Label(side, text="From Google News; click a headline to open it. Headlines mostly "
+                      "explain moves that already happened.", style="Muted.TLabel",
+                      wraplength=420).pack(anchor="w", pady=(8, 0))
         ttk.Label(box, text=f"{ticker} checklist", style="Title.TLabel").pack(anchor="w")
         ttk.Label(box, text="Extra facts, not part of the score (Yahoo keeps no history of most, so "
                   "they can't be backtested).", style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
@@ -409,9 +609,8 @@ class App:
         body.pack(fill="both", expand=True, pady=10)
         left = ttk.LabelFrame(body, text="Selected stock", padding=10)
         left.pack(side="left", fill="both", expand=True)
-        self.card = tk.Text(left, width=62, height=20, wrap="word", font=("Consolas", 10),
-                            relief="flat", background=PALETTE["card"], padx=10, pady=8,
-                            highlightthickness=1, highlightbackground=PALETTE["line"])
+        self.card = tk.Text(left, width=62, height=20, wrap="word", relief="flat", padx=10, pady=8,
+                            **text_widget_colors())
         self.card.pack(fill="both", expand=True)
         self.set_card("Press \"Find best buy candidates\".\n\n"
                       "It ranks big US companies on value, quality, growth and momentum,\n"
@@ -529,15 +728,28 @@ class App:
             return "Budget: enter an amount above to see how many shares it buys."
         one = int(budget // price)
         each = int(budget / 5 // price)
-        return (f"With {st.money(budget)}: {one} share(s) of this stock ({st.money(one * price)}),\n"
-                f"  or {each} share(s) of it as one fifth of a top-5 basket ({st.money(each * price)}).")
+        line = f"With {st.money(budget)}: {one} share(s) of this stock ({st.money(one * price)})."
+        if each:
+            line += f"\n  As one fifth of a top-5 basket: {each} share(s) ({st.money(each * price)})."
+        else:
+            line += (f"\n  A fifth of it ({st.money(budget / 5)}) doesn't buy one share; a top-5 "
+                     f"basket needs a bigger budget.")
+        return line
 
     def pick_checklist(self):
         t = self.selected_ticker()
         if t:
             wl = list(st.load_state()["watchlist"])
             self.run_bg(f"Checking {t} (forecasts, insiders, risks)...",
-                        lambda: st.company_checks(t, wl), lambda c: self.show_checklist(t, c))
+                        lambda: (st.company_checks(t, wl), self.safe_news(t)),
+                        lambda r: self.show_checklist(t, *r))
+
+    def safe_news(self, t):
+        try:
+            name = self.ranked.at[t, "name"] if self.ranked is not None and t in self.ranked.index else t
+            return st.web_news(f'"{st.short_name(name)}" stock')
+        except Exception:
+            return []
 
     def pick_to_practice(self):
         self.practice_use_top5()
@@ -623,7 +835,7 @@ class App:
         c = h["Close"]
         ax = self.ax
         ax.clear()
-        ax.plot(c.index, c, label="Price", linewidth=1.4, color="#2563eb")
+        ax.plot(c.index, c, label="Price", linewidth=1.4, color=PALETTE["accent"])
         ax.plot(c.index, c.rolling(50).mean(), label="50-day avg", linewidth=1, color="#f59e0b")
         ax.plot(c.index, c.rolling(200).mean(), label="200-day avg", linewidth=1, color="#6b7280")
         ax.set_title(f"{t} - {p} price history")
@@ -654,7 +866,7 @@ class App:
         for c, h, w in zip(cols, heads, (70, 90, 90, 80, 110, 360)):
             self.pos_tv.heading(c, text=h)
             self.pos_tv.column(c, width=w, anchor="w" if c == "status" else "center")
-        self.pos_tv.tag_configure("bad", foreground="#b91c1c")
+        self.pos_tv.tag_configure("bad", foreground=PALETTE["bad"])
         self.pos_tv.pack(fill="x")
         self.pos_tv.bind("<<TreeviewSelect>>", lambda e: self.fill_form())
 
@@ -683,7 +895,7 @@ class App:
         self.days = tk.StringVar(value="30")
         ttk.Spinbox(chk, from_=1, to=365, textvariable=self.days, width=5).pack(side="left")
         ttk.Label(chk, text="   Red rows are worth a closer look. Double-click a row to open it.",
-                  foreground="gray").pack(side="left")
+                  style="Muted.TLabel").pack(side="left")
 
         ev = ttk.Frame(f)
         ev.pack(fill="both", expand=True)
@@ -692,7 +904,7 @@ class App:
         for c, w in zip(cols, (70, 90, 130, 760)):
             self.ev_tv.heading(c, text=c.title() if c != "text" else "What happened")
             self.ev_tv.column(c, width=w, anchor="w", stretch=c == "text")
-        self.ev_tv.tag_configure("flag", foreground="#b91c1c", background="#fee2e2")
+        self.ev_tv.tag_configure("flag", foreground=PALETTE["bad"], background=PALETTE["flagbg"])
         sb = ttk.Scrollbar(ev, orient="vertical", command=self.ev_tv.yview)
         self.ev_tv.configure(yscrollcommand=sb.set)
         self.ev_tv.pack(side="left", fill="both", expand=True)
@@ -864,8 +1076,8 @@ class App:
         cols = ("time", "side", "shares", "ticker", "price", "reason", "pnl")
         self.p_trades = self.make_tree(left, cols, ("Time", "Buy/Sell", "Shares", "Stock", "Price",
                                                     "Why", "Profit/loss"), (120, 60, 55, 60, 80, 85, 85))
-        self.p_trades.tag_configure("win", foreground="#15803d")
-        self.p_trades.tag_configure("loss", foreground="#b91c1c")
+        self.p_trades.tag_configure("win", foreground=PALETTE["good"])
+        self.p_trades.tag_configure("loss", foreground=PALETTE["bad"])
 
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -961,8 +1173,8 @@ class App:
                           st.money(p * pos["shares"]) if p else "-", st.pct(gain)),
                          ("win",) if (gain or 0) > 0 else ("loss",) if (gain or 0) < 0 else ()))
         self.fill_tree(self.p_hold, rows)
-        self.p_hold.tag_configure("win", foreground="#15803d")
-        self.p_hold.tag_configure("loss", foreground="#b91c1c")
+        self.p_hold.tag_configure("win", foreground=PALETTE["good"])
+        self.p_hold.tag_configure("loss", foreground=PALETTE["bad"])
         self.fill_tree(self.p_trades, [
             ((x["time"], x["side"], x["shares"], x["ticker"], st.money(x["price"]), x["reason"],
               st.money(x["pnl"]) if x["pnl"] is not None else ""),
@@ -975,7 +1187,7 @@ class App:
             h["time"] = st.pd.to_datetime(h["time"])
             short = h["time"].iloc[-1] - h["time"].iloc[0] < st.pd.Timedelta(days=1)
             x = range(len(h)) if short else h["time"]      # dates look silly within one day
-            ax.plot(x, h["value"], color="#2563eb", linewidth=2, label="Your test")
+            ax.plot(x, h["value"], color=PALETTE["accent"], linewidth=2, label="Your test")
             ax.plot(x, h["spy"], color="#6b7280", linewidth=1.2, label=f"Same money in {st.BENCH}")
             ax.legend(fontsize=8)
             ax.set_xlabel("price updates" if short else "")
@@ -999,7 +1211,7 @@ class App:
         ttk.Checkbutton(top, text="Include runners-up (top 5 of each run)",
                         variable=self.track_all).pack(side="left", padx=8)
         ttk.Label(top, text="Every 'Find best buy candidate' result is saved here automatically.",
-                  foreground="gray").pack(side="left")
+                  style="Muted.TLabel").pack(side="left")
         self.track_sum = tk.StringVar(value=(
             "Press Refresh to see how your past picks did compared with SPY, a fund that holds the\n"
             "500 largest US companies. If the picks don't beat SPY over time, the score isn't helping."))
@@ -1013,8 +1225,8 @@ class App:
         for c, h in zip(cols, heads):
             tv.heading(c, text=h)
             tv.column(c, width=100, anchor="center")
-        tv.tag_configure("good", foreground="#15803d")
-        tv.tag_configure("bad", foreground="#b91c1c")
+        tv.tag_configure("good", foreground=PALETTE["good"])
+        tv.tag_configure("bad", foreground=PALETTE["bad"])
         tv.pack(fill="both", expand=True)
 
     def do_track(self):
@@ -1052,7 +1264,7 @@ class App:
                                      state="disabled")
         self.bt_csv_btn.pack(side="left", padx=6)
         ttk.Label(top, text="First run downloads old SEC reports (a few minutes); later runs reuse them.",
-                  foreground="gray").pack(side="left")
+                  style="Muted.TLabel").pack(side="left")
 
         body = ttk.Frame(f)
         body.pack(fill="both", expand=True, pady=8)
@@ -1093,10 +1305,10 @@ class App:
         self.bt_text.set("\n".join(st.backtest_lines(summary, info)) + "\n\n" + st.BACKTEST_CAVEATS)
         ax = self.bt_ax
         ax.clear()
-        colors = ["#2563eb", "#7c3aed", "#111827", "#9ca3af"]
+        colors = [PALETTE["accent"], "#a855f7", PALETTE["text"], PALETTE["muted"]]
         for (name, s), color in zip(summary.items(), colors):
             ax.plot(m.index, 10000 * (1 + m[s["col"]]).cumprod(), label=name, color=color,
-                    linewidth=2 if color == "#2563eb" else 1.2)
+                    linewidth=2 if color == colors[0] else 1.2)
         ax.set_title("Growth of $10,000 (past results, not a forecast)")
         ax.set_ylabel("$")
         ax.grid(alpha=0.3)
@@ -1136,6 +1348,19 @@ class App:
         ttk.Button(box, text="Open data & reports folder",
                    command=self.open_data).pack(side="left", padx=6)
 
+        box = ttk.LabelFrame(f, text="Look", padding=10)
+        box.pack(fill="x", pady=(0, 10))
+        prefs = st.load_state().get("prefs") or {}
+        self.pref_vars = {}
+        for key, label, choices, default in (("theme", "Colours", list(THEMES), "Light"),
+                                             ("accent", "Accent", list(ACCENTS), "Blue"),
+                                             ("size", "Text size", list(TEXT_SIZES), "Normal")):
+            ttk.Label(box, text=f"{label}:").pack(side="left")
+            var = self.pref_vars[key] = tk.StringVar(value=prefs.get(key, default))
+            ttk.Combobox(box, textvariable=var, values=choices, state="readonly",
+                         width=12).pack(side="left", padx=(4, 14))
+        ttk.Button(box, text="Apply (restarts the app)", command=self.apply_prefs).pack(side="left")
+
         box = ttk.LabelFrame(f, text="Automatic daily run", padding=10)
         box.pack(fill="x")
         ttk.Label(box, wraplength=900, justify="left", text=(
@@ -1153,7 +1378,7 @@ class App:
         self.daily_state = tk.StringVar(value="Status: " + ("ON" if daily_task_exists() else "off"))
         ttk.Label(row, textvariable=self.daily_state, style="Bold.TLabel").pack(side="left", padx=8)
 
-        ttk.Label(f, justify="left", foreground="#374151", text=(
+        ttk.Label(f, justify="left", style="Muted.TLabel", text=(
             "About this tool\n\n"
             "- Buy-only: it suggests stocks to research buying, and when to consider selling\n"
             "  shares you already own. No shorting, margin or options, so the most you can\n"
@@ -1181,6 +1406,17 @@ class App:
             messagebox.showerror("Stock Tracker", f"Couldn't create the shortcut:\n{e}")
             return
         messagebox.showinfo("Stock Tracker", f"Shortcut created:\n{p}")
+
+    def apply_prefs(self):
+        with st.STATE_LOCK:
+            s = st.load_state()
+            s["prefs"] = {k: v.get() for k, v in self.pref_vars.items()}
+            st.save_state(s)
+        if self.busy and not messagebox.askyesno("Stock Tracker", "Something is still loading. "
+                                                 "Restart anyway?"):
+            return
+        subprocess.Popen([str(pythonw()), str(APP_DIR / "StockTracker.pyw")], cwd=str(APP_DIR))
+        self.root.destroy()
 
     def set_daily(self, on):
         try:
