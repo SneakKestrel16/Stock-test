@@ -123,13 +123,18 @@ def fetch_info(ticker):
     return ticker, {}
 
 
-def get_fundamentals(tickers):
+def print_progress(i, n):
+    print(f"\r  company data {i}/{n}", end="" if i < n else "\n", flush=True)
+
+
+def get_fundamentals(tickers, progress=print_progress):
     rows = []
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = [pool.submit(fetch_info, t) for t in tickers]
         for i, fut in enumerate(as_completed(futures), 1):
             t, info = fut.result()
-            print(f"\r  company data {i}/{len(tickers)}", end="", flush=True)
+            if progress:
+                progress(i, len(tickers))
             if not info:
                 continue
             mcap, fcf = info.get("marketCap"), info.get("freeCashflow")
@@ -149,12 +154,10 @@ def get_fundamentals(tickers):
                 "analystUpside": (target / price - 1) if target and price else None,
                 "recommendation": info.get("recommendationKey"),
             })
-    print()
     return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
 
 
 def get_price_signals(tickers):
-    print("  price history...")
     data = yf.download(tickers, period="13mo", auto_adjust=True, progress=False, threads=True)
     close = data["Close"]
     if isinstance(close, pd.Series):
@@ -191,7 +194,7 @@ def score(df, weights):
             fs[factor] = pd.concat(ranks, axis=1).mean(axis=1).fillna(0.5)
     total = sum(weights[f] for f in fs)
     if total == 0:
-        sys.exit("All weights are zero.")
+        raise ValueError("All weights are zero.")
     fs["score"] = sum(fs[f] * weights[f] for f in fs) / total
     return fs
 
@@ -201,9 +204,48 @@ def parse_weights(pairs):
     for p in pairs or []:
         k, _, v = p.partition("=")
         if k not in w:
-            sys.exit(f"Unknown factor '{k}'. Use: {', '.join(w)}")
+            raise ValueError(f"Unknown factor '{k}'. Use: {', '.join(w)}")
         w[k] = float(v)
     return w
+
+
+def screen(tickers, weights, min_mcap, progress=print_progress):
+    """Rank tickers that pass the safety filters. Returns (ranked_df, filter_report),
+    filter_report being [(label, removed_count)]. ranked_df is empty if none pass."""
+    df = get_fundamentals(tickers, progress)
+    if df.empty:
+        raise RuntimeError("No data returned. Check your internet connection.")
+    df = df.join(get_price_signals(list(df.index)), how="left")
+
+    # Safety filters: only steady, profitable, uptrending companies qualify.
+    num = lambda c: pd.to_numeric(df[c], errors="coerce")
+    checks = {
+        f"market cap >= ${min_mcap/1e9:.0f}B": num("marketCap").fillna(0) >= min_mcap,
+        "expected to be profitable (forward P/E > 0)": num("forwardPE") > 0,
+        "generates cash (free cash flow > 0)": num("fcfYield") > 0,
+        "in an uptrend (price above 200-day average)": num("last") > num("ma200"),
+        "debt not extreme (debt/equity < 250%)": num("debtToEquity").fillna(0) < 250,
+    }
+    keep = pd.Series(True, index=df.index)
+    report = []
+    for label, ok in checks.items():
+        ok = ok.fillna(False)
+        report.append((label, int((keep & ~ok).sum())))
+        keep &= ok
+    df = df[keep]
+    if df.empty:
+        return df, report
+    return df.join(score(df, weights)).sort_values("score", ascending=False), report
+
+
+def add_to_watchlist(t, bought=None, stop=0.15, keep_existing=False):
+    st = load_state()
+    entry = {"added": str(date.today()), "bought": bought, "stop_pct": stop}
+    if keep_existing:
+        st["watchlist"].setdefault(t, entry)
+    else:
+        st["watchlist"][t] = entry
+    save_state(st)
 
 
 def cmd_pick(a):
@@ -211,34 +253,19 @@ def cmd_pick(a):
         tickers = [l.strip().upper() for l in open(a.file) if l.strip() and not l.startswith("#")]
     else:
         tickers = [t.upper() for t in a.tickers] if a.tickers else DEFAULT_TICKERS
-    weights = parse_weights(a.weights)
+    try:
+        weights = parse_weights(a.weights)
+        print(f"Screening {len(tickers)} stocks (buy-only)...")
+        df, report = screen(tickers, weights, a.min_mcap)
+    except (ValueError, RuntimeError) as e:
+        sys.exit(str(e))
 
-    print(f"Screening {len(tickers)} stocks (buy-only)...")
-    df = get_fundamentals(tickers)
-    if df.empty:
-        sys.exit("No data returned. Check your internet connection.")
-    df = df.join(get_price_signals(list(df.index)), how="left")
-
-    # Safety filters: only steady, profitable, uptrending companies qualify.
-    num = lambda c: pd.to_numeric(df[c], errors="coerce")
-    checks = {
-        f"market cap >= ${a.min_mcap/1e9:.0f}B": num("marketCap").fillna(0) >= a.min_mcap,
-        "expected to be profitable (forward P/E > 0)": num("forwardPE") > 0,
-        "generates cash (free cash flow > 0)": num("fcfYield") > 0,
-        "in an uptrend (price above 200-day average)": num("last") > num("ma200"),
-        "debt not extreme (debt/equity < 250%)": num("debtToEquity").fillna(0) < 250,
-    }
-    keep = pd.Series(True, index=df.index)
     print("\nSafety filters:")
-    for label, ok in checks.items():
-        ok = ok.fillna(False)
-        print(f"  - {label}: {int((keep & ~ok).sum())} removed")
-        keep &= ok
-    df = df[keep]
+    for label, removed in report:
+        print(f"  - {label}: {removed} removed")
     if df.empty:
         sys.exit("No stock passed every filter right now. That itself is a signal to be patient.")
 
-    df = df.join(score(df, weights)).sort_values("score", ascending=False)
     top = df.iloc[0]
     t = df.index[0]
     stop = top["price"] * (1 - a.stop) if pd.notna(top["price"]) else None
@@ -270,50 +297,64 @@ def cmd_pick(a):
     print("  A high score means 'looks strong on these measures today', not 'will go up'.")
 
     if a.add:
-        st = load_state()
-        st["watchlist"].setdefault(t, {"added": str(date.today()), "bought": None, "stop_pct": a.stop})
-        save_state(st)
+        add_to_watchlist(t, stop=a.stop, keep_existing=True)
         print(f"  Added {t} to your watchlist.")
 
 
 # ------------------------------------------------------------ history -----
 
+RETURN_WINDOWS = [("1 month", 21), ("3 months", 63), ("6 months", 126),
+                  ("1 year", 252), ("3 years", 756), ("5 years", 1260)]
+
+
+def history_stats(ticker, period="5y"):
+    """Returns (hist_df, stats, uptrend). Raises ValueError if there is no data."""
+    t = ticker.upper()
+    h = yf.Ticker(t).history(period=period, auto_adjust=True)
+    if h.empty:
+        raise ValueError(f"No price history for {t}. Check the ticker symbol.")
+    c = h["Close"]
+    last = c.iloc[-1]
+    years = (c.index[-1] - c.index[0]).days / 365.25
+    dd = c / c.cummax() - 1
+    low_day = dd.idxmin()
+    divs = h["Dividends"][h.index >= h.index[-1] - pd.Timedelta(days=365)].sum() if "Dividends" in h else 0
+    yr = c.tail(252)
+    stats = {
+        "last": last, "last_date": c.index[-1],
+        "returns": [(label, c.iloc[-1] / c.iloc[-1 - n] - 1)
+                    for label, n in RETURN_WINDOWS if len(c) > n],
+        "years": years,
+        "cagr": (last / c.iloc[0]) ** (1 / years) - 1 if years > 0.5 else None,
+        "low_52w": yr.min(), "high_52w": yr.max(),
+        "volatility": c.pct_change().tail(252).std() * 252 ** 0.5,
+        "worst_drop": dd.min(), "peak_day": c[:low_day].idxmax(), "low_day": low_day,
+        "dividends": divs, "ma50": c.tail(50).mean(), "ma200": c.tail(200).mean(),
+    }
+    return h, stats, last > stats["ma200"]
+
+
 def cmd_history(a):
     t = a.ticker.upper()
     print(f"Pulling {a.period} of history for {t}...")
-    h = yf.Ticker(t).history(period=a.period, auto_adjust=True)
-    if h.empty:
-        sys.exit(f"No price history for {t}. Check the ticker symbol.")
-    c = h["Close"]
-    last = c.iloc[-1]
+    try:
+        h, s, uptrend = history_stats(t, a.period)
+    except ValueError as e:
+        sys.exit(str(e))
+    c, last, divs = h["Close"], s["last"], s["dividends"]
 
-    def back(n):
-        return c.iloc[-1] / c.iloc[-1 - n] - 1 if len(c) > n else None
-
-    years = (c.index[-1] - c.index[0]).days / 365.25
-    cagr = (last / c.iloc[0]) ** (1 / years) - 1 if years > 0.5 else None
-    dd = c / c.cummax() - 1
-    low_day = dd.idxmin()
-    peak_day = c[:low_day].idxmax()
-    divs = h["Dividends"][h.index >= h.index[-1] - pd.Timedelta(days=365)].sum() if "Dividends" in h else 0
-    ma50, ma200 = c.tail(50).mean(), c.tail(200).mean()
-    yr = c.tail(252)
-
-    print(f"\n{t}  last close {money(last)}  ({c.index[-1]:%Y-%m-%d})")
+    print(f"\n{t}  last close {money(last)}  ({s['last_date']:%Y-%m-%d})")
     print("-" * 50)
-    for label, n in [("1 month", 21), ("3 months", 63), ("6 months", 126),
-                     ("1 year", 252), ("3 years", 756), ("5 years", 1260)]:
-        r = back(n)
-        if r is not None:
-            print(f"  Return {label:9}  {pct(r)}")
-    print(f"  Yearly avg (CAGR)  {pct(cagr)} over {years:.1f} years")
-    print(f"  52-week range      {money(yr.min())} - {money(yr.max())}")
-    print(f"  Volatility         {pct(c.pct_change().tail(252).std() * 252 ** 0.5)} per year")
-    print(f"  Worst drop         {pct(dd.min())} ({peak_day:%b %Y} to {low_day:%b %Y})")
+    for label, r in s["returns"]:
+        print(f"  Return {label:9}  {pct(r)}")
+    print(f"  Yearly avg (CAGR)  {pct(s['cagr'])} over {s['years']:.1f} years")
+    print(f"  52-week range      {money(s['low_52w'])} - {money(s['high_52w'])}")
+    print(f"  Volatility         {pct(s['volatility'])} per year")
+    print(f"  Worst drop         {pct(s['worst_drop'])} ({s['peak_day']:%b %Y} to {s['low_day']:%b %Y})")
     print(f"  Dividends (1 yr)   {money(divs)}  (yield {pct(divs / last) if divs else '-'})")
-    print(f"  50-day average     {money(ma50)}")
-    print(f"  200-day average    {money(ma200)}  -> "
-          f"{'price ABOVE: uptrend' if last > ma200 else 'price BELOW: downtrend, be cautious'}")
+    print(f"  50-day average     {money(s['ma50'])}")
+    print(f"  200-day average    {money(s['ma200'])}  -> "
+          f"{'price ABOVE: uptrend' if uptrend else 'price BELOW: downtrend, be cautious'}")
     print("\n  Worst drop is a useful gut check: could you hold through that again?")
 
     csv = Path(f"{t}_history.csv")
@@ -517,50 +558,69 @@ def position_alerts(t, pos, hist):
     return lines
 
 
+def check_ticker(ticker, state, days=30, show_all=False):
+    """Gather events for one ticker. Returns {alerts, events, note, price}; events are
+    only the new ones unless show_all. Marks everything found as seen in state."""
+    t = ticker.upper()
+    since = str(date.today() - timedelta(days=days))
+    tk = yf.Ticker(t)
+    news = [e for e in news_events(tk) if e["date"] >= since]
+    events = news + analyst_events(tk, since) + calendar_events(tk)
+    moves, hist = price_events(tk, since)
+    events += moves
+    filings, note = sec_events(t, state.get("contact"), since)
+    events += filings
+
+    alerts = position_alerts(t, state["watchlist"].get(t, {}), hist)
+    seen = set(state["seen"].get(t, []))
+    new = events if show_all else [e for e in events if e["id"] not in seen]
+    new.sort(key=lambda e: e["date"], reverse=True)
+    state["seen"][t] = sorted(seen | {e["id"] for e in events})[-500:]
+    price = hist["Close"].iloc[-1] if hist is not None and not hist.empty else None
+    return {"alerts": alerts, "events": new, "note": note, "price": price}
+
+
+def save_report(results):
+    """results: {ticker: check_ticker() result}. Writes Markdown, returns its path."""
+    report = [f"# Stock watch {date.today()}\n"]
+    for t, r in results.items():
+        report.append(f"\n## {t}\n")
+        report += [f"- **{line}**" for line in r["alerts"]]
+        if not r["events"]:
+            report.append("- Nothing new.")
+        for e in r["events"]:
+            report.append(f"- {'**RED FLAG** ' if e.get('flag') else ''}{e['date']} {e['kind']}: "
+                          f"{e['text']}" + (f" ([link]({e['url']}))" if e["url"] else ""))
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    out = REPORTS / f"watch_{datetime.now():%Y-%m-%d_%H%M}.md"
+    out.write_text("\n".join(report))
+    return out
+
+
 def cmd_watch(a):
     st = load_state()
     tickers = [t.upper() for t in a.tickers] if a.tickers else list(st["watchlist"])
     if not tickers:
         sys.exit("Watchlist is empty. Add one with:  python stock_tracker.py add MSFT")
-    since = str(date.today() - timedelta(days=a.days))
-    report = [f"# Stock watch {date.today()}\n"]
+    results = {}
 
     for t in tickers:
         print(f"\n{'=' * 66}\n  {t}\n{'=' * 66}")
-        report.append(f"\n## {t}\n")
-        tk = yf.Ticker(t)
-        news = [e for e in news_events(tk) if e["date"] >= since]
-        events = news + analyst_events(tk, since) + calendar_events(tk)
-        moves, hist = price_events(tk, since)
-        events += moves
-        filings, note = sec_events(t, st.get("contact"), since)
-        events += filings
-
-        for line in position_alerts(t, st["watchlist"].get(t, {}), hist):
+        r = results[t] = check_ticker(t, st, a.days, a.all)
+        for line in r["alerts"]:
             print("  " + line)
-            report.append(f"- **{line}**")
-
-        seen = set(st["seen"].get(t, []))
-        new = events if a.all else [e for e in events if e["id"] not in seen]
-        new.sort(key=lambda e: e["date"], reverse=True)
-        if not new:
+        if not r["events"]:
             print("  Nothing new since your last check.")
-            report.append("- Nothing new.")
-        for e in new:
+        for e in r["events"]:
             mark = "!!" if e.get("flag") else "  "
             print(f"  {mark} {e['date']}  {e['kind']:16} {e['text']}")
             if e["url"]:
                 print(f"     {'':10}  {e['url']}")
-            report.append(f"- {'**RED FLAG** ' if e.get('flag') else ''}{e['date']} {e['kind']}: "
-                          f"{e['text']}" + (f" ([link]({e['url']}))" if e["url"] else ""))
-        if note:
-            print(f"  ({note})")
-        st["seen"][t] = sorted(seen | {e["id"] for e in events})[-500:]
+        if r["note"]:
+            print(f"  ({r['note']})")
 
     save_state(st)
-    REPORTS.mkdir(parents=True, exist_ok=True)
-    out = REPORTS / f"watch_{datetime.now():%Y-%m-%d_%H%M}.md"
-    out.write_text("\n".join(report))
+    out = save_report(results)
     print(f"\nLines marked !! are worth a closer look. Report saved to {out}")
 
 
@@ -571,10 +631,8 @@ def cmd_add(a):
         sys.exit("--bought must be the positive price you paid per share.")
     if not 0 < a.stop < 1:
         sys.exit("--stop is a fraction, e.g. 0.15 for 15% below your buy price.")
-    st = load_state()
     t = a.ticker.upper()
-    st["watchlist"][t] = {"added": str(date.today()), "bought": a.bought, "stop_pct": a.stop}
-    save_state(st)
+    add_to_watchlist(t, a.bought, a.stop)
     extra = f", bought at {money(a.bought)}, stop {a.stop:.0%} below" if a.bought else ""
     print(f"Watching {t}{extra}.")
 

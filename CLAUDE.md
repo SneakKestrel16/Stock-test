@@ -47,10 +47,13 @@ conversation where this project started.
   command runs offline. Cloud sandboxes usually can't reach Yahoo or sec.gov,
   so use this to test there. All commands passed with it.
 
-## Next task: desktop app + desktop shortcut (not started)
+## Desktop app + desktop shortcut (done 2026-10-22)
 
-The user asked for this to be "an app for my computer" with a desktop shortcut.
-Planned design (the user saw it and didn't object):
+Built as planned below: `StockTracker.pyw`, `Start Stock Tracker.bat`,
+`tests/fake_gui.py`. The shortcut was created on the user's PC (Desktop is under
+OneDrive). Gotcha: running a test script from `%TEMP%` breaks `import numpy`
+(something there shadows a module), so run drivers from a clean folder.
+Original design:
 
 1. **Refactor `stock_tracker.py`** so the logic returns data instead of printing,
    keeping the CLI working on top of it:

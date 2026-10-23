@@ -1,0 +1,641 @@
+"""
+StockTracker.pyw - desktop window for stock_tracker.py (double-click to run).
+
+Tabs: Pick, History, Watchlist, Settings. Same buy-only logic as the command
+line; nothing here shorts, uses margin or trades options. Not financial advice.
+
+    pythonw StockTracker.pyw              # open the app
+    pythonw StockTracker.pyw --shortcut   # just create the desktop shortcut
+"""
+
+import os
+import queue
+import subprocess
+import sys
+import threading
+import traceback
+import webbrowser
+from datetime import datetime
+from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+APP_DIR = Path(__file__).resolve().parent
+LOG = Path.home() / ".stock_tracker" / "app_error.log"
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+PACKAGES = {"yfinance": "yfinance", "pandas": "pandas", "requests": "requests",
+            "matplotlib": "matplotlib"}
+
+
+def log_error(text):
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(f"\n--- {datetime.now():%Y-%m-%d %H:%M:%S}\n{text}")
+
+
+def show_error(exc_type, exc, tb):
+    text = "".join(traceback.format_exception(exc_type, exc, tb))
+    log_error(text)
+    messagebox.showerror("Stock Tracker error", f"{exc}\n\nDetails were saved to:\n{LOG}")
+
+
+def ensure_packages():
+    """.pyw has no console, so offer to install missing packages in a dialog."""
+    missing = []
+    for mod, pkg in PACKAGES.items():
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
+    if not missing:
+        return True
+    root = tk.Tk()
+    root.withdraw()
+    if not messagebox.askyesno("Stock Tracker", "Some free add-ons this app needs are missing:\n  "
+                               + ", ".join(missing) + "\n\nInstall them now? (takes a minute)"):
+        return False
+    r = subprocess.run([sys.executable, "-m", "pip", "install", *missing],
+                       capture_output=True, text=True, creationflags=NO_WINDOW)
+    if r.returncode != 0:
+        log_error(r.stdout + r.stderr)
+        messagebox.showerror("Stock Tracker", f"Install failed. Details saved to:\n{LOG}")
+        return False
+    root.destroy()
+    return True
+
+
+def desktop_shortcut_path():
+    r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "[Environment]::GetFolderPath('Desktop')"],
+                       capture_output=True, text=True, creationflags=NO_WINDOW)
+    return Path(r.stdout.strip()) / "Stock Tracker.lnk"
+
+
+def create_shortcut():
+    """Desktop shortcut that runs this file with pythonw.exe (no console window).
+    Returns the .lnk path. Desktop may be inside OneDrive, so ask Windows for it."""
+    exe = Path(sys.executable)
+    if exe.name.lower() == "python.exe" and exe.with_name("pythonw.exe").exists():
+        exe = exe.with_name("pythonw.exe")
+    q = lambda p: str(p).replace("'", "''")          # PowerShell single-quote escape
+    script = APP_DIR / "StockTracker.pyw"
+    ps = ("$d=[Environment]::GetFolderPath('Desktop');"
+          "$p=Join-Path $d 'Stock Tracker.lnk';"
+          "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($p);"
+          f"$s.TargetPath='{q(exe)}';"
+          f"$s.Arguments='\"{q(script)}\"';"
+          f"$s.WorkingDirectory='{q(APP_DIR)}';"
+          "$s.Description='Stock Tracker (buy-only research tool)';"
+          "$s.Save();Write-Output $p")
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, text=True, creationflags=NO_WINDOW)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "PowerShell could not create the shortcut.")
+    return Path(r.stdout.strip())
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.q = queue.Queue()
+        self.busy = False
+        self.ranked = None
+        self.prices = {}
+        self.event_urls = {}
+        self.hist = None
+
+        root.title("Stock Tracker (buy-only research, not financial advice)")
+        root.geometry("1150x720")
+        root.minsize(900, 560)
+        style = ttk.Style()
+        style.configure("Card.TLabel", font=("Consolas", 10))
+        style.configure("Big.TButton", font=("Segoe UI", 11, "bold"), padding=6)
+
+        nb = ttk.Notebook(root)
+        nb.pack(fill="both", expand=True, padx=6, pady=(6, 0))
+        self.nb = nb
+        self.build_pick(ttk.Frame(nb, padding=8))
+        self.build_history(ttk.Frame(nb, padding=8))
+        self.build_watch(ttk.Frame(nb, padding=8))
+        self.build_settings(ttk.Frame(nb, padding=8))
+
+        bar = ttk.Frame(root, padding=(6, 3))
+        bar.pack(fill="x")
+        self.status = tk.StringVar(value="Ready.")
+        ttk.Label(bar, textvariable=self.status).pack(side="left")
+        self.spinner = ttk.Progressbar(bar, mode="indeterminate", length=160)
+
+        self.refresh_watchlist()
+        root.after(100, self.poll)
+        root.after(400, self.offer_shortcut)
+
+    # ------------------------------------------------------ background work
+    def run_bg(self, label, fn, done):
+        """Run fn() in a thread; done(result) runs back on the tk thread."""
+        if self.busy:
+            messagebox.showinfo("Stock Tracker", "Still working on the last request, please wait.")
+            return
+        self.busy = True
+        self.status.set(label)
+        self.spinner.pack(side="right")
+        self.spinner.start(12)
+
+        def work():
+            try:
+                self.q.put(("done", done, fn()))
+            except Exception as e:
+                self.q.put(("error", e, traceback.format_exc()))
+        threading.Thread(target=work, daemon=True).start()
+
+    def progress(self, text):
+        """Safe to call from worker threads."""
+        self.q.put(("status", text, None))
+
+    def poll(self):
+        try:
+            while True:
+                kind, a, b = self.q.get_nowait()
+                if kind == "status":
+                    self.status.set(a)
+                    continue
+                self.busy = False
+                self.spinner.stop()
+                self.spinner.pack_forget()
+                if kind == "done":
+                    self.status.set("Ready.")
+                    a(b)
+                else:
+                    log_error(b)
+                    self.status.set("Something went wrong.")
+                    messagebox.showerror("Stock Tracker", str(a))
+        except queue.Empty:
+            pass
+        self.root.after(100, self.poll)
+
+    # ------------------------------------------------------------- pick tab
+    def build_pick(self, f):
+        self.nb.add(f, text="  Pick  ")
+        top = ttk.Frame(f)
+        top.pack(fill="x")
+        ttk.Button(top, text="Find best buy candidate", style="Big.TButton",
+                   command=self.do_pick).pack(side="left")
+        ttk.Label(top, text="   Min company size ($ billions):").pack(side="left")
+        self.min_mcap = tk.StringVar(value="10")
+        ttk.Entry(top, textvariable=self.min_mcap, width=6).pack(side="left")
+        ttk.Label(top, text="   Stop-loss %:").pack(side="left")
+        self.pick_stop = tk.StringVar(value="15")
+        ttk.Entry(top, textvariable=self.pick_stop, width=5).pack(side="left")
+        ttk.Label(top, text=f"   Screens {len(st.DEFAULT_TICKERS)} large US companies.",
+                  foreground="gray").pack(side="left")
+
+        body = ttk.Frame(f)
+        body.pack(fill="both", expand=True, pady=8)
+        left = ttk.LabelFrame(body, text="Candidate", padding=8)
+        left.pack(side="left", fill="both", expand=True)
+        self.card = tk.Text(left, width=60, height=20, wrap="word", font=("Consolas", 10),
+                            relief="flat", background=self.root.cget("background"))
+        self.card.pack(fill="both", expand=True)
+        self.set_card("Press \"Find best buy candidate\". It takes about a minute.\n\n"
+                      "A high score means 'looks strong on these measures today',\n"
+                      "not 'will go up'.")
+        btns = ttk.Frame(left)
+        btns.pack(fill="x", pady=(6, 0))
+        self.pick_add = ttk.Button(btns, text="Add to watchlist", command=self.pick_to_watch,
+                                   state="disabled")
+        self.pick_add.pack(side="left")
+        self.pick_hist = ttk.Button(btns, text="View history", command=self.pick_to_history,
+                                    state="disabled")
+        self.pick_hist.pack(side="left", padx=6)
+
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        ttk.Label(right, text="Ranked candidates (click a row to see it):").pack(anchor="w")
+        cols = ("rank", "ticker", "name", "score", "price")
+        self.rank_tv = ttk.Treeview(right, columns=cols, show="headings", height=10,
+                                    selectmode="browse")
+        for c, w in zip(cols, (45, 70, 200, 60, 90)):
+            self.rank_tv.heading(c, text=c.title())
+            self.rank_tv.column(c, width=w, anchor="w" if c == "name" else "center")
+        self.rank_tv.pack(fill="both", expand=True)
+        self.rank_tv.bind("<<TreeviewSelect>>", lambda e: self.show_candidate())
+        ttk.Label(right, text="Safety filters (stocks removed):").pack(anchor="w", pady=(8, 0))
+        self.filters = tk.StringVar()
+        ttk.Label(right, textvariable=self.filters, justify="left").pack(anchor="w")
+
+    def set_card(self, text):
+        self.card.configure(state="normal")
+        self.card.delete("1.0", "end")
+        self.card.insert("1.0", text)
+        self.card.configure(state="disabled")
+
+    def do_pick(self):
+        try:
+            mcap = float(self.min_mcap.get()) * 1e9
+            self.stop_frac = float(self.pick_stop.get()) / 100
+            assert 0 < self.stop_frac < 1
+        except (ValueError, AssertionError):
+            messagebox.showwarning("Stock Tracker", "Enter numbers, e.g. 10 and 15.")
+            return
+        weights = st.parse_weights(None)
+        self.run_bg("Downloading company data...",
+                    lambda: st.screen(st.DEFAULT_TICKERS, weights, mcap,
+                                      lambda i, n: self.progress(f"Company data {i}/{n}...")),
+                    self.pick_done)
+
+    def pick_done(self, result):
+        df, report = result
+        self.filters.set("\n".join(f"  {label}: {n}" for label, n in report))
+        self.rank_tv.delete(*self.rank_tv.get_children())
+        self.ranked = df
+        if df.empty:
+            self.set_card("No stock passed every safety filter right now.\n"
+                          "That itself is a signal to be patient.")
+            return
+        for i, (t, r) in enumerate(df.iterrows(), 1):
+            self.rank_tv.insert("", "end", iid=t, values=(i, t, r["name"], f"{r['score']:.2f}",
+                                                         st.money(r["price"])))
+        self.rank_tv.selection_set(df.index[0])
+
+    def selected_ticker(self):
+        sel = self.rank_tv.selection()
+        return sel[0] if sel else None
+
+    def show_candidate(self):
+        t = self.selected_ticker()
+        if not t or self.ranked is None:
+            return
+        r = self.ranked.loc[t]
+        rank = list(self.ranked.index).index(t) + 1
+        stop = r["price"] * (1 - self.stop_frac) if st.pd.notna(r["price"]) else None
+        pe = f"{r['forwardPE']:.1f}" if st.pd.notna(r["forwardPE"]) else "-"
+        head = "TOP BUY CANDIDATE" if rank == 1 else f"CANDIDATE #{rank}"
+        self.set_card(
+            f"{head}: {t}\n{r['name']}  ({r['sector']})\n\n"
+            f"Price now:          {st.money(r['price'])}\n"
+            f"Overall score:      {r['score']:.2f} / 1.00  (#{rank} of {len(self.ranked)})\n"
+            f"  value {r['value']:.2f} | quality {r['quality']:.2f}\n"
+            f"  growth {r['growth']:.2f} | momentum {r['momentum']:.2f}\n\n"
+            f"Forward P/E:        {pe}   (price vs expected profit; lower = cheaper)\n"
+            f"Revenue growth:     {st.pct(r['revenueGrowth'])}\n"
+            f"Profit margin:      {st.pct(r['profitMargins'])}\n"
+            f"12-month momentum:  {st.pct(r['mom_12_1'])}\n"
+            f"Yearly volatility:  {st.pct(r['vol_1y'])}  (typical yearly swing)\n"
+            f"Analyst target:     {st.pct(r['analystUpside'])} vs today "
+            f"(consensus: {r['recommendation'] or 'n/a'})\n\n"
+            f"If you buy (whole shares, cash account, no margin):\n"
+            f"  Suggested stop-loss: {st.money(stop)} ({self.stop_frac:.0%} below today).\n"
+            f"  Selling there caps your loss; you can never lose more than you invest.\n"
+            f"  Keep any single stock to a small slice of your savings (many use <=5%).")
+        self.pick_add.configure(state="normal")
+        self.pick_hist.configure(state="normal")
+
+    def pick_to_watch(self):
+        t = self.selected_ticker()
+        if t:
+            st.add_to_watchlist(t, stop=self.stop_frac, keep_existing=True)
+            self.refresh_watchlist()
+            self.status.set(f"{t} added to your watchlist.")
+
+    def pick_to_history(self):
+        t = self.selected_ticker()
+        if t:
+            self.hist_ticker.set(t)
+            self.nb.select(1)
+            self.do_history()
+
+    # ---------------------------------------------------------- history tab
+    def build_history(self, f):
+        self.nb.add(f, text="  History  ")
+        top = ttk.Frame(f)
+        top.pack(fill="x")
+        ttk.Label(top, text="Ticker:").pack(side="left")
+        self.hist_ticker = tk.StringVar(value="MSFT")
+        e = ttk.Entry(top, textvariable=self.hist_ticker, width=10)
+        e.pack(side="left")
+        e.bind("<Return>", lambda ev: self.do_history())
+        ttk.Label(top, text="  Period:").pack(side="left")
+        self.period = tk.StringVar(value="5y")
+        ttk.Combobox(top, textvariable=self.period, values=["1y", "2y", "5y", "10y", "max"],
+                     width=6, state="readonly").pack(side="left")
+        ttk.Button(top, text="Show history", command=self.do_history).pack(side="left", padx=6)
+        self.save_csv_btn = ttk.Button(top, text="Save CSV...", command=self.save_csv,
+                                       state="disabled")
+        self.save_csv_btn.pack(side="left")
+
+        body = ttk.Frame(f)
+        body.pack(fill="both", expand=True, pady=8)
+        self.hist_stats = tk.StringVar(value="Type a ticker (e.g. MSFT) and press Show history.")
+        ttk.Label(body, textvariable=self.hist_stats, style="Card.TLabel", justify="left",
+                  width=46, anchor="nw").pack(side="left", fill="y")
+
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        self.fig = Figure(figsize=(7, 4.5), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=body)
+        self.canvas.get_tk_widget().pack(side="left", fill="both", expand=True)
+
+    def do_history(self):
+        t = self.hist_ticker.get().strip().upper()
+        if not t:
+            return
+        p = self.period.get()
+        self.run_bg(f"Downloading {p} of history for {t}...",
+                    lambda: (t, p, *st.history_stats(t, p)), self.history_done)
+
+    def history_done(self, result):
+        t, p, h, s, uptrend = result
+        self.hist = (t, h)
+        last, divs = s["last"], s["dividends"]
+        lines = [f"{t}  last close {st.money(last)}  ({s['last_date']:%Y-%m-%d})", "-" * 44]
+        lines += [f"Return {label:9}   {st.pct(r)}" for label, r in s["returns"]]
+        lines += [
+            f"Yearly avg (CAGR)  {st.pct(s['cagr'])} over {s['years']:.1f} yrs",
+            f"52-week range      {st.money(s['low_52w'])} - {st.money(s['high_52w'])}",
+            f"Volatility         {st.pct(s['volatility'])} per year",
+            f"Worst drop         {st.pct(s['worst_drop'])}",
+            f"                   ({s['peak_day']:%b %Y} to {s['low_day']:%b %Y})",
+            f"Dividends (1 yr)   {st.money(divs)}"
+            + (f"  (yield {st.pct(divs / last)})" if divs else ""),
+            f"50-day average     {st.money(s['ma50'])}",
+            f"200-day average    {st.money(s['ma200'])}",
+            "",
+            "Price ABOVE 200-day average: uptrend." if uptrend
+            else "Price BELOW 200-day average:\ndowntrend, be cautious.",
+            "",
+            "Worst drop is a useful gut check:\ncould you hold through that again?",
+        ]
+        self.hist_stats.set("\n".join(lines))
+        c = h["Close"]
+        ax = self.ax
+        ax.clear()
+        ax.plot(c.index, c, label="Price", linewidth=1.4, color="#2563eb")
+        ax.plot(c.index, c.rolling(50).mean(), label="50-day avg", linewidth=1, color="#f59e0b")
+        ax.plot(c.index, c.rolling(200).mean(), label="200-day avg", linewidth=1, color="#6b7280")
+        ax.set_title(f"{t} - {p} price history")
+        ax.set_ylabel("Price ($)")
+        ax.grid(alpha=0.3)
+        ax.legend()
+        self.fig.tight_layout()
+        self.canvas.draw()
+        self.save_csv_btn.configure(state="normal")
+
+    def save_csv(self):
+        if not self.hist:
+            return
+        t, h = self.hist
+        path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                            initialfile=f"{t}_history.csv",
+                                            filetypes=[("CSV (opens in Excel)", "*.csv")])
+        if path:
+            h.to_csv(path)
+            self.status.set(f"Saved {path}")
+
+    # -------------------------------------------------------- watchlist tab
+    def build_watch(self, f):
+        self.nb.add(f, text="  Watchlist  ")
+        cols = ("ticker", "bought", "price", "gain", "stop", "status")
+        heads = ("Ticker", "Bought at", "Price", "Gain", "Stop-loss level", "Status")
+        self.pos_tv = ttk.Treeview(f, columns=cols, show="headings", height=6, selectmode="browse")
+        for c, h, w in zip(cols, heads, (70, 90, 90, 80, 110, 360)):
+            self.pos_tv.heading(c, text=h)
+            self.pos_tv.column(c, width=w, anchor="w" if c == "status" else "center")
+        self.pos_tv.tag_configure("bad", foreground="#b91c1c")
+        self.pos_tv.pack(fill="x")
+        self.pos_tv.bind("<<TreeviewSelect>>", lambda e: self.fill_form())
+
+        form = ttk.Frame(f)
+        form.pack(fill="x", pady=6)
+        ttk.Label(form, text="Ticker:").pack(side="left")
+        self.w_ticker = tk.StringVar()
+        ttk.Entry(form, textvariable=self.w_ticker, width=8).pack(side="left")
+        ttk.Label(form, text="  Bought at $ (blank if not bought):").pack(side="left")
+        self.w_bought = tk.StringVar()
+        ttk.Entry(form, textvariable=self.w_bought, width=9).pack(side="left")
+        ttk.Label(form, text="  Stop-loss %:").pack(side="left")
+        self.w_stop = tk.StringVar(value="15")
+        ttk.Entry(form, textvariable=self.w_stop, width=5).pack(side="left")
+        ttk.Button(form, text="Add / update", command=self.watch_add).pack(side="left", padx=6)
+        ttk.Button(form, text="Remove selected", command=self.watch_remove).pack(side="left")
+
+        chk = ttk.Frame(f)
+        chk.pack(fill="x", pady=(4, 6))
+        ttk.Button(chk, text="Check for updates", style="Big.TButton",
+                   command=self.do_watch).pack(side="left")
+        self.show_all = tk.BooleanVar()
+        ttk.Checkbutton(chk, text="Show everything (not just new)",
+                        variable=self.show_all).pack(side="left", padx=8)
+        ttk.Label(chk, text="Look back days:").pack(side="left")
+        self.days = tk.StringVar(value="30")
+        ttk.Spinbox(chk, from_=1, to=365, textvariable=self.days, width=5).pack(side="left")
+        ttk.Label(chk, text="   Red rows are worth a closer look. Double-click a row to open it.",
+                  foreground="gray").pack(side="left")
+
+        ev = ttk.Frame(f)
+        ev.pack(fill="both", expand=True)
+        cols = ("ticker", "date", "kind", "text")
+        self.ev_tv = ttk.Treeview(ev, columns=cols, show="headings")
+        for c, w in zip(cols, (70, 90, 130, 760)):
+            self.ev_tv.heading(c, text=c.title() if c != "text" else "What happened")
+            self.ev_tv.column(c, width=w, anchor="w", stretch=c == "text")
+        self.ev_tv.tag_configure("flag", foreground="#b91c1c", background="#fee2e2")
+        sb = ttk.Scrollbar(ev, orient="vertical", command=self.ev_tv.yview)
+        self.ev_tv.configure(yscrollcommand=sb.set)
+        self.ev_tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        self.ev_tv.bind("<Double-1>", self.open_event)
+
+    def refresh_watchlist(self, statuses=None):
+        statuses = statuses or {}
+        self.pos_tv.delete(*self.pos_tv.get_children())
+        for t, p in st.load_state()["watchlist"].items():
+            bought, price = p.get("bought"), self.prices.get(t)
+            gain = price / bought - 1 if bought and price else None
+            stop = bought * (1 - p.get("stop_pct", 0.15)) if bought else None
+            status = statuses.get(t, "Press 'Check for updates'" if price is None else "OK")
+            bad = status.startswith("!!") or "below" in status
+            self.pos_tv.insert("", "end", iid=t, tags=("bad",) if bad else (), values=(
+                t, st.money(bought), st.money(price), st.pct(gain),
+                f"{st.money(stop)} ({p.get('stop_pct', 0.15):.0%})" if stop else "-", status))
+
+    def fill_form(self):
+        sel = self.pos_tv.selection()
+        if not sel:
+            return
+        p = st.load_state()["watchlist"].get(sel[0], {})
+        self.w_ticker.set(sel[0])
+        self.w_bought.set(f"{p['bought']:g}" if p.get("bought") else "")
+        self.w_stop.set(f"{p.get('stop_pct', 0.15) * 100:g}")
+
+    def watch_add(self):
+        t = self.w_ticker.get().strip().upper()
+        try:
+            bought = float(self.w_bought.get()) if self.w_bought.get().strip() else None
+            stop = float(self.w_stop.get()) / 100
+            assert t and (bought is None or bought > 0) and 0 < stop < 1
+        except (ValueError, AssertionError):
+            messagebox.showwarning("Stock Tracker", "Enter a ticker, the positive price you paid "
+                                   "(or leave it blank), and a stop-loss % between 1 and 99.")
+            return
+        st.add_to_watchlist(t, bought, stop)
+        self.refresh_watchlist()
+        self.status.set(f"Watching {t}.")
+
+    def watch_remove(self):
+        sel = self.pos_tv.selection()
+        if sel and messagebox.askyesno("Stock Tracker", f"Stop watching {sel[0]}?"):
+            s = st.load_state()
+            s["watchlist"].pop(sel[0], None)
+            s["seen"].pop(sel[0], None)
+            st.save_state(s)
+            self.refresh_watchlist()
+
+    def do_watch(self):
+        try:
+            days = int(self.days.get())
+        except ValueError:
+            days = 30
+        show_all = self.show_all.get()
+
+        def work():
+            state = st.load_state()
+            results = {}
+            for i, t in enumerate(state["watchlist"], 1):
+                self.progress(f"Checking {t} ({i}/{len(state['watchlist'])})...")
+                results[t] = st.check_ticker(t, state, days, show_all)
+            st.save_state(state)
+            return results, st.save_report(results) if results else None
+
+        if not st.load_state()["watchlist"]:
+            messagebox.showinfo("Stock Tracker", "Your watchlist is empty. Add a ticker first.")
+            return
+        self.run_bg("Checking your watchlist...", work, self.watch_done)
+
+    def watch_done(self, result):
+        results, report = result
+        self.ev_tv.delete(*self.ev_tv.get_children())
+        self.event_urls.clear()
+        statuses = {}
+        for t, r in results.items():
+            self.prices[t] = r["price"]
+            short = []
+            for line in r["alerts"]:
+                if line.startswith("!!"):
+                    short.append("!! STOP-LOSS HIT: consider selling")
+                elif line.startswith("Up 50%"):
+                    short.append("Up 50%+: consider taking some profit")
+                elif "below its 200-day" in line:
+                    short.append("below 200-day average (downtrend)")
+                if not line.startswith("Your position"):
+                    self.ev_tv.insert("", "end", values=(t, "", "Alert", line),
+                                      tags=("flag",) if line.startswith("!!") else ())
+            statuses[t] = "; ".join(short) or "OK"
+            if not r["events"]:
+                self.ev_tv.insert("", "end", values=(t, "", "", "Nothing new since your last check."))
+            for e in r["events"]:
+                iid = self.ev_tv.insert("", "end", values=(t, e["date"], e["kind"], e["text"]),
+                                        tags=("flag",) if e.get("flag") else ())
+                if e["url"]:
+                    self.event_urls[iid] = e["url"]
+            if r["note"]:
+                self.ev_tv.insert("", "end", values=(t, "", "Note", r["note"]))
+        self.refresh_watchlist(statuses)
+        if report:
+            self.status.set(f"Done. Report saved to {report}")
+
+    def open_event(self, _):
+        sel = self.ev_tv.selection()
+        if sel and sel[0] in self.event_urls:
+            webbrowser.open(self.event_urls[sel[0]])
+
+    # --------------------------------------------------------- settings tab
+    def build_settings(self, f):
+        self.nb.add(f, text="  Settings  ")
+        box = ttk.LabelFrame(f, text="SEC filings", padding=10)
+        box.pack(fill="x")
+        ttk.Label(box, text="The SEC's free filings service asks for a contact email. It is "
+                  "sent only to sec.gov and stored on this computer.\nLeave it blank to skip "
+                  "SEC filings.", justify="left").pack(anchor="w")
+        row = ttk.Frame(box)
+        row.pack(anchor="w", pady=(6, 0))
+        ttk.Label(row, text="Contact email:").pack(side="left")
+        self.contact = tk.StringVar(value=st.load_state().get("contact") or "")
+        ttk.Entry(row, textvariable=self.contact, width=36).pack(side="left", padx=4)
+        ttk.Button(row, text="Save", command=self.save_contact).pack(side="left")
+
+        box = ttk.LabelFrame(f, text="This computer", padding=10)
+        box.pack(fill="x", pady=10)
+        ttk.Button(box, text="Create desktop shortcut",
+                   command=self.make_shortcut).pack(side="left")
+        ttk.Button(box, text="Open data & reports folder",
+                   command=self.open_data).pack(side="left", padx=6)
+
+        ttk.Label(f, justify="left", foreground="#374151", text=(
+            "About this tool\n\n"
+            "- Buy-only: it suggests stocks to research buying, and when to consider selling\n"
+            "  shares you already own. No shorting, margin or options, so the most you can\n"
+            "  lose is what you put in.\n"
+            "- It ranks stocks on measurable facts. It cannot predict prices.\n"
+            "- Not financial advice. Do your own research before investing."
+        )).pack(anchor="w", pady=10)
+
+    def save_contact(self):
+        email = self.contact.get().strip()
+        if email and "@" not in email:
+            messagebox.showwarning("Stock Tracker", "That doesn't look like an email address.")
+            return
+        s = st.load_state()
+        s["contact"] = email or None
+        st.save_state(s)
+        self.status.set("Saved." if email else "Cleared. SEC filings will be skipped.")
+
+    def make_shortcut(self):
+        try:
+            p = create_shortcut()
+        except Exception as e:
+            log_error(traceback.format_exc())
+            messagebox.showerror("Stock Tracker", f"Couldn't create the shortcut:\n{e}")
+            return
+        messagebox.showinfo("Stock Tracker", f"Shortcut created:\n{p}")
+
+    def open_data(self):
+        st.HOME.mkdir(parents=True, exist_ok=True)
+        os.startfile(st.HOME)
+
+    def offer_shortcut(self):
+        s = st.load_state()
+        if s.get("shortcut_offered") or sys.platform != "win32":
+            return
+        s["shortcut_offered"] = True
+        st.save_state(s)
+        if desktop_shortcut_path().exists():
+            return
+        if messagebox.askyesno("Stock Tracker", "Put a Stock Tracker shortcut on your desktop?\n"
+                               "(You can also do this later in Settings.)"):
+            self.make_shortcut()
+
+
+def main():
+    global st
+    sys.excepthook = show_error
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)    # crisp text on scaled screens
+        except Exception:
+            pass
+    if "--shortcut" in sys.argv:
+        print(create_shortcut())
+        return
+    if not ensure_packages():
+        return
+    sys.path.insert(0, str(APP_DIR))
+    import stock_tracker as st
+    root = tk.Tk()
+    root.report_callback_exception = show_error
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

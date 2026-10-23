@@ -50,4 +50,5 @@ def fake_get(url, headers=None, timeout=None):
       "accessionNumber":["0001-26-1","0001-26-2","0001-26-3","0001-26-4","x"],"primaryDocument":["a.htm"]*5,
       "items":["5.02,9.01","","","","2.02"]}}})
 s.requests.get=fake_get
-sys.argv=["x"]+sys.argv[1:]; s.main()
+if __name__ == "__main__":
+    sys.argv=["x"]+sys.argv[1:]; s.main()

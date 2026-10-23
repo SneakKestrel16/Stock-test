@@ -14,7 +14,19 @@ filings, analyst changes, earnings dates and big price moves.
 py -m pip install -r requirements.txt
 ```
 
-## Use
+## Desktop app
+
+Double-click **`Start Stock Tracker.bat`** once. The app opens and offers to put a
+**Stock Tracker** shortcut on your desktop (also in its Settings tab). After that,
+use the shortcut. Tabs: **Pick** (best buy candidate + ranked list), **History**
+(returns, worst drop, chart, save CSV), **Watchlist** (your stocks, stop-loss
+levels, news/filings/analyst changes; red rows need a closer look) and
+**Settings** (SEC contact email, data folder, shortcut).
+
+If something goes wrong, the app shows a message and logs details to
+`~/.stock_tracker/app_error.log`.
+
+## Command line
 
 ```powershell
 py stock_tracker.py pick --add               # best buy candidate (+ add to watchlist)
@@ -42,8 +54,3 @@ the top N.
 
 Watchlist, seen items, the SEC contact email and reports live in
 `~/.stock_tracker/` on your computer. Nothing personal is stored in this repo.
-
-## Roadmap
-
-- [ ] Desktop app (window with Pick / History / Watchlist / Settings tabs) and a
-      desktop shortcut. See `CLAUDE.md` for the spec.

@@ -12,5 +12,7 @@ python tests/fake_run.py add MSFT --bought 500
 python tests/fake_run.py watch
 ```
 
+`python tests/fake_gui.py` opens the desktop app on the same fake data.
+
 Set `HOME` (or `USERPROFILE` on Windows) to a scratch folder first so the test
 doesn't touch your real watchlist in `~/.stock_tracker`.
