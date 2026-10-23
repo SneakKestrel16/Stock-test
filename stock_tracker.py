@@ -1437,6 +1437,10 @@ def stock_detail(ticker, contact=None, watchlist=None, period="5y"):
     h, stats, uptrend = history_stats(t, period)          # ValueError for unknown tickers
     name = info.get("shortName") or info.get("longName") or t
     d = {"ticker": t, "name": name, "info": info, "hist": h, "stats": stats, "uptrend": uptrend}
+    try:                                                   # Yahoo/Stock Rover-style "vs the index" line
+        d["spy_returns"] = dict(history_stats("SPY", period)[1]["returns"])
+    except Exception:
+        d["spy_returns"] = {}
     d["yahoo_news"] = news_events(tk)[:15]
     try:
         d["web_news"] = web_news(f'"{short_name(name)}" stock')
@@ -1461,6 +1465,9 @@ def detail_facts(info):
             ("Profit margin", pct(g("profitMargins"))), ("Revenue growth", pct(g("revenueGrowth"))),
             ("Debt / equity", f"{g('debtToEquity'):.0f}%" if g("debtToEquity") else "-"),
             ("Beta (swing vs market)", f"{g('beta'):.2f}" if g("beta") else "-"),
+            ("Payout ratio", f"{g('payoutRatio'):.0%} of profit" if div and g("payoutRatio") else "-"),
+            ("Short interest", f"{g('shortPercentOfFloat'):.1%} of shares" if g("shortPercentOfFloat") else "-"),
+            ("Owned by insiders", f"{g('heldPercentInsiders'):.1%}" if g("heldPercentInsiders") else "-"),
             ("Analyst target", f"{money(g('targetMeanPrice'))} ({g('recommendationKey') or 'n/a'})"),
             ("Employees", f"{g('fullTimeEmployees'):,}" if g("fullTimeEmployees") else "-")]
 
@@ -1475,6 +1482,8 @@ def cmd_lookup(a):
         print(f"  {label:24} {text}")
     s = d["stats"]
     print(f"\n  Returns: " + ", ".join(f"{k} {pct(v)}" for k, v in s["returns"]))
+    if d["spy_returns"]:
+        print("  S&P 500: " + ", ".join(f"{k} {pct(d['spy_returns'].get(k))}" for k, _ in s["returns"]))
     print(f"  Worst drop {pct(s['worst_drop'])}; {'uptrend' if d['uptrend'] else 'downtrend'} "
           f"(200-day average {money(s['ma200'])})")
     summary = d["info"].get("longBusinessSummary")

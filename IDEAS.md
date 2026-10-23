@@ -200,3 +200,25 @@ Ranked by expected value for effort. Same rule: measure before keeping.
 8. **Desktop notification** when the daily run finds a stop-loss hit or red flag.
 9. Piotroski F-score from SEC data, then backtest it as a quality factor.
 
+
+## Compared with other stock apps (2026-10-23)
+
+From general knowledge of each app's public features, not a fresh survey;
+check their sites before relying on a detail.
+
+| App | What it does well | Taken here? |
+|---|---|---|
+| Yahoo Finance | Quote page, chart vs index, key stats, news | **Built**: Stock tab with S&P 500 same-period returns line |
+| Finviz | Screener filters, short interest, insider trades, heat map | **Built**: short interest, insider ownership; insider trades already in checklist. Heat map skipped (decoration, no decision value) |
+| Morningstar | Fair value estimate, moat rating, dividend safety | **Built**: payout ratio. Fair value / moat skipped: analyst judgement we can't reproduce or test |
+| Seeking Alpha | Quant factor grades (value, growth, profitability, momentum) | Already the score's four parts. Idea: grade a looked-up stock against the list |
+| Robinhood | Simple buy flow, price alerts | Stop-loss alerts exist; buying stays out (research tool only) |
+| Stock Rover | Peer comparison tables, portfolio vs benchmark | Track record vs SPY exists. Idea: peers table on the Stock tab |
+
+**Not adding** (on purpose): social-media sentiment and "trending" lists
+(noise, no point-in-time history to test), price predictions or targets of our
+own, options/margin anything (long-only rule), real-time streaming quotes
+(this ranks monthly; seconds don't matter).
+
+**Remove?** Nothing removed. The weakest feature is the analyst target line:
+targets lag price and the backtest can't test them. It stays as context only.

@@ -444,6 +444,9 @@ class App:
             w.insert("end", f"{text}\n")
         w.insert("end", "\nReturns  ", "muted")
         w.insert("end", "  ".join(f"{k} {st.pct(v)}" for k, v in s["returns"]) + "\n")
+        if d.get("spy_returns"):
+            w.insert("end", "S&P 500  ", "muted")
+            w.insert("end", "  ".join(f"{k} {st.pct(d['spy_returns'].get(k))}" for k, _ in s["returns"]) + "\n", "muted")
         w.insert("end", "Worst drop ", "muted")
         w.insert("end", f"{st.pct(s['worst_drop'])}   ")
         w.insert("end", "uptrend\n" if d["uptrend"] else "downtrend\n", "good" if d["uptrend"] else "bad")
