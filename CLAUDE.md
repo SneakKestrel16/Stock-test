@@ -94,6 +94,12 @@ conversation where this project started.
   `_refill` uses all cash right after each sale (sales and refills interleave,
   so it's that sale's money plus rounding scraps), leaves unpriced stocks in
   `queue`, and parks the rest in SPY (exempt from day stops).
+  `practice replay` (`day_replay`): Yahoo 5m bars (60-day limit), morning
+  ranking via `rank_asof(prev close)` with SEC point-in-time facts (shared with
+  `backtest`, refactor verified: same picks), same `_buy_even` / `_auto_sell` /
+  `_refill` as live. Gotcha: the replay ranks on trailing P/E from SEC, live
+  `pick` on Yahoo's forward P/E, so their top 5 differ (2026-10-23: replay JNJ
+  MSFT LLY CSCO ADBE, live CVX COP XOM NVDA AMD). Result in README.
   Gotcha: `tests/fake_run.py` now switches HOME to a temp folder on import;
   before that, GUI drivers wrote fake picks into the real journal.
 - `stock_screener.py`: earlier, simpler ranker (prints top N). Kept for reference.

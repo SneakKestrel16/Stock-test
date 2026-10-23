@@ -986,6 +986,44 @@ def fact_asof(f, day, years_back=0):
     return f["val"].iloc[-1] if len(f) else float("nan")
 
 
+def price_signals(adj):
+    """Momentum inputs from adjusted daily closes, each row using only that day and before."""
+    return {"mom": adj.shift(21) / adj.shift(252) - 1, "ret6": adj / adj.shift(126) - 1,
+            "ma200": adj.rolling(200).mean()}
+
+
+def rank_asof(d, pool, close, adj, frames, sigs, min_mcap, weights, sectors=None):
+    """Rank `pool` as `pick` would have at day d's close: prices up to d, SEC figures
+    filed by d. Returns (ranked_df, priced tickers, tickers that couldn't be valued)."""
+    nan = float("nan")
+    priced = [t for t in pool if pd.notna(adj.at[d, t])]
+    feats = []
+    for t in priced:
+        fr = frames.get(t, {})
+        get = lambda item, back=0: fact_asof(fr.get(item), d, back)
+        mcap = close.at[d, t] * get("shares")
+        ni, ni0, rev, eq = get("net_income"), get("net_income", 1), get("revenue"), get("equity")
+        feats.append({
+            "ticker": t, "marketCap": mcap,
+            "forwardPE": mcap / ni,       # trailing P/E stands in: old forecasts aren't public
+            # ponytail: a missing yearly capex row counts as 0 (overstates free cash a
+            # little); some filers skip it in certain years (e.g. NVDA FY2019).
+            "priceToBook": mcap / eq,
+            "fcfYield": (get("op_cash") - (0 if pd.isna(get("capex")) else get("capex"))) / mcap,
+            "returnOnEquity": ni / eq, "profitMargins": ni / rev,
+            "debtToEquity": get("debt") / eq * 100,
+            "revenueGrowth": rev / get("revenue", 1) - 1,
+            "earningsGrowth": ni / ni0 - 1 if ni0 > 0 else nan,
+            "mom_12_1": sigs["mom"].at[d, t], "ret_6m": sigs["ret6"].at[d, t],
+            "last": adj.at[d, t], "ma200": sigs["ma200"].at[d, t]})
+    df = pd.DataFrame(feats).set_index("ticker")
+    bad = list(df.index[df["marketCap"].isna() | df["forwardPE"].isna()])
+    df, _ = apply_filters(df, min_mcap)
+    if len(df):
+        df = df.join(score(df, weights, sectors)).sort_values("score", ascending=False)
+    return df, priced, bad
+
+
 def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, progress=None,
              sector_neutral=False, market_filter=False, sector_cap=None, every=1, universe="list"):
     """Replay `pick` at every month-end of the past `years`, using only data public
@@ -1022,46 +1060,19 @@ def backtest(tickers=None, years=10, min_mcap=10e9, weights=None, contact=None, 
 
     all_sectors = get_sectors(tickers) if sector_neutral or sector_cap else {}
     sectors = all_sectors if sector_neutral else None
-    mom = adj.shift(21) / adj.shift(252) - 1
-    ret6 = adj / adj.shift(126) - 1
-    ma200 = adj.rolling(200).mean()
+    sigs = price_signals(adj)
+    ma200 = sigs["ma200"]
     month_ends = adj.groupby(adj.index.to_period("M")).tail(1).index
     month_ends = month_ends[month_ends >= adj.index[0] + pd.DateOffset(months=13)]
-    nan = float("nan")
-
     rows, unvalued, held = [], {}, []
     for k, (d, d2) in enumerate(zip(month_ends[:-1], month_ends[1:]), 1):
         say(f"Replaying month {k}/{len(month_ends) - 1} ({d:%Y-%m})...")
         pool = [t for t in (members.get(f"{d:%Y-%m}", []) if members else tickers) if t in adj.columns]
         n_members = len(members.get(f"{d:%Y-%m}", [])) if members else len(tickers)
-        priced = [t for t in pool if pd.notna(adj.at[d, t])]
-        feats = []
-        for t in priced:
-            fr = frames.get(t, {})
-            get = lambda item, back=0: fact_asof(fr.get(item), d, back)
-            mcap = close.at[d, t] * get("shares")
-            ni, ni0, rev, eq = get("net_income"), get("net_income", 1), get("revenue"), get("equity")
-            feats.append({
-                "ticker": t, "marketCap": mcap,
-                "forwardPE": mcap / ni,       # trailing P/E stands in: old forecasts aren't public
-                # ponytail: a missing yearly capex row counts as 0 (overstates free cash a
-                # little); some filers skip it in certain years (e.g. NVDA FY2019).
-                "priceToBook": mcap / eq,
-                "fcfYield": (get("op_cash") - (0 if pd.isna(get("capex")) else get("capex"))) / mcap,
-                "returnOnEquity": ni / eq, "profitMargins": ni / rev,
-                "debtToEquity": get("debt") / eq * 100,
-                "revenueGrowth": rev / get("revenue", 1) - 1,
-                "earningsGrowth": ni / ni0 - 1 if ni0 > 0 else nan,
-                "mom_12_1": mom.at[d, t], "ret_6m": ret6.at[d, t],
-                "last": adj.at[d, t], "ma200": ma200.at[d, t]})
-        df = pd.DataFrame(feats).set_index("ticker")
-        bad = df["marketCap"].isna() | df["forwardPE"].isna()
-        for t in df.index[bad]:
+        df, priced, bad = rank_asof(d, pool, close, adj, frames, sigs, min_mcap, weights, sectors)
+        for t in bad:
             unvalued[t] = unvalued.get(t, 0) + 1
-        coverage = (n_members, len(priced), int((~bad).sum()))
-        df, _ = apply_filters(df, min_mcap)
-        if len(df):
-            df = df.join(score(df, weights, sectors)).sort_values("score", ascending=False)
+        coverage = (n_members, len(priced), len(priced) - len(bad))
         top = basket(df, all_sectors, cap=sector_cap)
         if every > 1 and (k - 1) % every and held:
             top = held                   # not a rebalance month: keep last picks
@@ -1582,6 +1593,24 @@ def _trade(test, t, side, shares, price, reason):
 NY = "America/New_York"
 
 
+def _buy_even(test, tickers, prices):
+    """Split the test's cash evenly over `tickers` in whole shares."""
+    each = test["cash"] / len(tickers)
+    for t in tickers:
+        shares = int(each // prices[t])
+        if shares:
+            _trade(test, t, "BUY", shares, prices[t], "start")
+    # Whole shares leave cash over (3 x $511 of a $2,000 slice): add single shares,
+    # each to the stock furthest below its even slice, while any fits.
+    while True:
+        held = {t: test["positions"].get(t, {}).get("shares", 0) * prices[t] for t in tickers}
+        fits = [t for t in tickers if prices[t] <= test["cash"]]
+        if not fits:
+            break
+        t = min(fits, key=lambda t: held[t])
+        _trade(test, t, "BUY", 1, prices[t], "start")
+
+
 def market_holidays(year):
     """NYSE full-day closures {date: name}, from NYSE's published rules: a Saturday
     holiday moves to Friday (except New Year's), a Sunday one to Monday. Unscheduled
@@ -1679,20 +1708,7 @@ def start_practice(tickers, cash=10000.0, days=30, stop_pct=0.15, take_profit=No
             "cash0": cash, "cash": cash, "stop_pct": stop_pct, "take_profit": take_profit,
             "positions": {}, "trades": [], "spy_start": prices[BENCH], "status": "running",
             "history": [], "follow": follow, "switched": f"{now:%Y-%m-%d %H:%M}"}
-    each = cash / len(tickers)
-    for t in tickers:
-        shares = int(each // prices[t])
-        if shares:
-            _trade(test, t, "BUY", shares, prices[t], "start")
-    # Whole shares leave cash over (3 x $511 of a $2,000 slice): add single shares,
-    # each to the stock furthest below its even slice, while any fits.
-    while True:
-        held = {t: test["positions"].get(t, {}).get("shares", 0) * prices[t] for t in tickers}
-        fits = [t for t in tickers if prices[t] <= test["cash"]]
-        if not fits:
-            break
-        t = min(fits, key=lambda t: held[t])
-        _trade(test, t, "BUY", 1, prices[t], "start")
+    _buy_even(test, tickers, prices)
     _mark(test, prices)
     with STATE_LOCK:
         p = load_practice()
@@ -1766,6 +1782,24 @@ def _refill(test, prices):
         _trade(test, BENCH, "BUY", int(test["cash"] // p), p, "parked in SPY")
 
 
+def _auto_sell(test, prices):
+    """Stop-loss / take-profit sales at these prices; day tests refill after each."""
+    for t, pos in list(test["positions"].items()):
+        price = prices.get(t)
+        if not price or pd.isna(price):
+            continue
+        if t == BENCH and test.get("day"):
+            continue                      # parked cash rides SPY until the close
+        if price <= pos["cost"] * (1 - test["stop_pct"]):
+            _trade(test, t, "SELL", pos["shares"], price, "stop-loss")
+        elif test.get("take_profit") and price >= pos["cost"] * (1 + test["take_profit"]):
+            _trade(test, t, "SELL", pos["shares"], price, "take-profit")
+        else:
+            continue
+        if test.get("day"):
+            _refill(test, prices)
+
+
 def update_practice(end_now=None):
     """Refresh running tests: apply stop-loss / take-profit, record value, and end
     tests whose time is up (or `end_now`, a test id). Returns all tests."""
@@ -1784,20 +1818,7 @@ def update_practice(end_now=None):
         for test in p["tests"]:
             if test["status"] != "running":
                 continue
-            for t, pos in list(test["positions"].items()):
-                price = prices.get(t)
-                if not price or pd.isna(price):
-                    continue
-                if t == BENCH and test.get("day"):
-                    continue                      # parked cash rides SPY until the close
-                if price <= pos["cost"] * (1 - test["stop_pct"]):
-                    _trade(test, t, "SELL", pos["shares"], price, "stop-loss")
-                elif test.get("take_profit") and price >= pos["cost"] * (1 + test["take_profit"]):
-                    _trade(test, t, "SELL", pos["shares"], price, "take-profit")
-                else:
-                    continue
-                if test.get("day"):
-                    _refill(test, prices)
+            _auto_sell(test, prices)
             if test["id"] in due and top:
                 _switch(test, top, prices)
             _mark(test, prices)
@@ -1861,10 +1882,130 @@ def run_day(test):
             print(f"  (update skipped: {e})")
 
 
+def day_replay(days=30, cash=10000.0, stop_pct=0.02, take_profit=0.03, contact=None, say=print):
+    """Replay the day-trade rules on Yahoo's 5-minute bars for the last `days` full
+    sessions, with no peeking: each morning's ranking uses only daily closes up to
+    the day before and SEC figures filed by then; during the day each decision sees
+    only bars already finished. Money carries over from day to day.
+    Returns (days_df, trades_df, summary)."""
+    if not contact:
+        raise ValueError("The replay ranks stocks with old SEC reports. Set your SEC contact "
+                         "email first (Settings tab, or: setup --contact you@example.com).")
+    tickers, weights = DEFAULT_TICKERS, parse_weights(None)
+    say("Downloading 5-minute prices (Yahoo keeps 60 days)...")
+    bars = yf.download(tickers + [BENCH], period="60d", interval="5m", auto_adjust=False,
+                       progress=False, threads=True)["Close"]
+    bars.index = bars.index.tz_convert(NY)
+    stamp = bars.index.strftime("%H:%M")
+    sessions = [d for d in sorted(set(bars.index.date))
+                if {"09:30", "15:50"} <= set(stamp[bars.index.date == d])][-days:]
+    if not sessions:
+        raise ValueError("No complete trading days in Yahoo's 5-minute data.")
+    say("Downloading daily prices for the morning rankings...")
+    data = naive(yf.download(tickers + [BENCH], start=pd.Timestamp(sessions[0]) - pd.Timedelta(days=500),
+                             auto_adjust=False, actions=True, progress=False, threads=True))
+    close, adj = data["Close"], data["Adj Close"]
+    splits = data["Stock Splits"] if "Stock Splits" in data.columns.get_level_values(0) else None
+    frames = {}
+    for i, t in enumerate(tickers, 1):
+        say(f"SEC report history {i}/{len(tickers)} ({t})...")
+        try:
+            frames[t] = fact_frames(company_facts(t, contact), splits[t] if splits is not None and t in splits else None)
+        except Exception:
+            frames[t] = {}
+    sigs = price_signals(adj)
+
+    test = {"cash": cash, "positions": {}, "trades": [], "stop_pct": stop_pct,
+            "take_profit": take_profit, "day": True}
+    rows, value = [], cash
+    for k, d in enumerate(sessions, 1):
+        say(f"Trading day {k}/{len(sessions)} ({d})...")
+        prev = adj.index[adj.index < pd.Timestamp(d)][-1]          # last close before today
+        ranked = rank_asof(prev, tickers, close, adj, frames, sigs, 10e9, weights)[0]
+        top = basket(ranked)
+        day_bars = bars[bars.index.date == d]
+        # a bar stamped 09:30 closes at 09:35: its close is the 09:35 price, as in the live test
+        times = [f"{(t + pd.Timedelta(minutes=5)):%H:%M}" for t in day_bars.index]
+        start_value, n0 = value, len(test["trades"])
+        test.update(cash=value, positions={}, queue=[t for t in ranked.index if t not in top])
+        spy_in = spy_out = top_in = end_prices = None
+        stamped = n0
+        for when, (_, row) in zip(times, day_bars.iterrows()):
+            if when < "09:35" or when > "15:55":
+                continue
+            prices = {t: float(v) for t, v in row.items() if pd.notna(v)}
+            if when == "09:35":
+                if not top or not all(t in prices for t in top):
+                    break                                          # no clean open: sit out
+                _buy_even(test, top, prices)
+                spy_in, top_in = prices.get(BENCH), {t: prices[t] for t in top}
+            else:
+                _auto_sell(test, prices)
+            if when == "15:55":
+                for t, pos in list(test["positions"].items()):
+                    if t in prices:
+                        _trade(test, t, "SELL", pos["shares"], prices[t], "day ended")
+                spy_out, end_prices = prices.get(BENCH), prices
+            for x in test["trades"][stamped:]:                    # bar time, not the clock
+                x["time"] = f"{d} {when}"
+            stamped = len(test["trades"])
+        value = test["cash"] + sum(p["shares"] * p["cost"] for p in test["positions"].values())
+        top_ret = (sum(end_prices[t] / top_in[t] - 1 for t in top_in if t in end_prices) / len(top_in)
+                   if top_in and end_prices else 0.0)
+        rows.append({"date": d, "bought": " ".join(top), "trades": len(test["trades"]) - n0,
+                     "value": round(value, 2), "day_ret": value / start_value - 1,
+                     "top5_hold_ret": top_ret,
+                     "spy_ret": spy_out / spy_in - 1 if spy_in and spy_out else 0.0})
+    days_df = pd.DataFrame(rows).set_index("date")
+    trades = pd.DataFrame(test["trades"])
+    g = lambda r: float((1 + r).prod())
+    sells = trades[(trades["side"] == "SELL")] if len(trades) else trades
+    summary = {"days": len(days_df), "start": cash, "end": value,
+               "growth": {"Day trading (these rules)": g(days_df["day_ret"]),
+                          "Top 5 held all day, no auto-sell": g(days_df["top5_hold_ret"]),
+                          f"{BENCH}, same hours": g(days_df["spy_ret"])},
+               "up_days": int((days_df["day_ret"] > 0).sum()),
+               "beat_spy_days": int((days_df["day_ret"] > days_df["spy_ret"]).sum()),
+               "trades": len(trades), "wins": int((sells["pnl"] > 0).sum()) if len(sells) else 0,
+               "sells": len(sells),
+               "by_reason": sells["reason"].value_counts().to_dict() if len(sells) else {}}
+    return days_df, trades, summary
+
+
+def replay_lines(days_df, summary):
+    lines = [f"Day-trade replay: {summary['days']} trading days "
+             f"({days_df.index[0]} to {days_df.index[-1]}), 5-minute prices, no peeking ahead.",
+             f"{money(summary['start'])} became {money(summary['end'])} "
+             f"({pct(summary['end'] / summary['start'] - 1)}).", "",
+             f"  {'Same days, 9:35 to 15:55':36} $10,000 became"]
+    lines += [f"  {name:36} {money(10000 * gr)}  ({pct(gr - 1)})" for name, gr in summary["growth"].items()]
+    lines += ["", f"Up days: {summary['up_days']} of {summary['days']}; beat SPY on {summary['beat_spy_days']}.",
+              f"Trades: {summary['trades']} ({summary['trades'] / summary['days']:.1f} a day). "
+              f"Sales that made money: {summary['wins']} of {summary['sells']}.",
+              "Why sold: " + ", ".join(f"{k} {v}" for k, v in summary["by_reason"].items()) + ".",
+              "", f"  {'date':10}  {'day':>7}  {'SPY':>7}  trades  bought at 9:35"]
+    lines += [f"  {d}  {pct(r['day_ret']):>7}  {pct(r['spy_ret']):>7}  {r['trades']:>6}  {r['bought']}"
+              for d, r in days_df.iterrows()]
+    lines += ["", "Limits: today's 64-stock list (some hindsight), fills at exact 5-minute prices,",
+              "no costs or taxes, trailing P/E instead of forecasts. 30 days is mostly luck."]
+    return lines
+
+
 def cmd_practice(a):
-    day = a.action == "day"
+    day = a.action in ("day", "replay")
     stop = a.stop if a.stop is not None else 0.02 if day else 0.15
     tp = a.take_profit if a.take_profit is not None or not day else 0.03
+    if a.action == "replay":
+        try:
+            days_df, trades, summary = day_replay(a.days, a.cash, stop, tp, load_state().get("contact"),
+                                                  lambda m: print("  " + m, flush=True))
+        except ValueError as e:
+            sys.exit(str(e))
+        print("\n" + "\n".join(replay_lines(days_df, summary)))
+        if a.csv:
+            trades.to_csv(a.csv, index=False)
+            print(f"\nEvery trade saved to {a.csv}")
+        return
     try:
         if a.action in ("start", "day"):
             test = start_practice(a.args, a.cash, a.days, stop, tp, follow=a.follow, day=day)
@@ -1994,11 +2135,12 @@ def main():
 
     p = sub.add_parser("practice", help="practice trading with pretend money at live prices")
     p.add_argument("action", nargs="?", default="status",
-                   choices=["status", "start", "day", "buy", "sell", "end"])
+                   choices=["status", "start", "day", "replay", "buy", "sell", "end"])
     p.add_argument("args", nargs="*", help="start: TICKERS | day: [TICKERS] (none = today's top 5, "
                    "trades until today's close) | buy/sell: TEST_ID TICKER SHARES | end: TEST_ID")
     p.add_argument("--cash", type=float, default=10000.0, help="pretend starting cash (default 10000)")
-    p.add_argument("--days", type=int, default=30, help="how long the test runs (default 30)")
+    p.add_argument("--days", type=int, default=30, help="how long the test runs; replay: trading days back (default 30)")
+    p.add_argument("--csv", help="replay: save every trade to this CSV file")
     p.add_argument("--stop", type=float, help="auto-sell this far below cost (default 0.15; day 0.02)")
     p.add_argument("--take-profit", type=float, help="auto-sell this far above cost, e.g. 0.3 (day default 0.03)")
     p.add_argument("--follow", action="store_true",

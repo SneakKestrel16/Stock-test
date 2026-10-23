@@ -114,6 +114,15 @@ assert not st.market_status(ny("2026-11-26 11:00"))[0] and "Thanksgiving" in st.
 assert st.market_status(ny("2026-11-27 12:59"))[0] and not st.market_status(ny("2026-11-27 13:00"))[0]
 print("ok market calendar")
 
+# day replay: trades only between 09:35 and 15:55, nothing held overnight, money compounds
+st.save_state({**st.load_state(), "contact": "a@b.c"})
+rd, rt, rs = st.day_replay(5, 10000, 0.02, 0.03, "a@b.c", say=lambda m: None)
+assert len(rd) == 5 and rt["time"].str[11:].between("09:35", "15:55").all()
+assert abs(10000 * (1 + rd["day_ret"]).prod() - rs["end"]) < 0.01
+last = rt.groupby(rt["time"].str[:10])
+assert all((g["side"] == "SELL").iloc[-1] for _, g in last)
+print("ok day replay")
+
 # GUI: an error in a result callback must not stop later results; a stock added while
 # "Check for updates" runs must survive; removing a stock clears its events
 g = runpy.run_path(str(REPO / "StockTracker.pyw"), run_name="lib")

@@ -37,7 +37,12 @@ class FakeTicker:
     def calendar(s_): return {"Earnings Date":[date.today()+timedelta(days=12)]}
     @property
     def fast_info(s_): return {"last_price": 100*random.uniform(0.8,1.25)}
-def fake_download(tickers, start=None, auto_adjust=True, actions=False, **k):
+def fake_download(tickers, start=None, auto_adjust=True, actions=False, interval="1d", **k):
+    if interval=="5m":     # 40 sessions of 78 bars, 09:30..15:55 New York, small random walk
+        days=pd.bdate_range(end=pd.Timestamp.today().normalize()-pd.Timedelta(days=1), periods=40)
+        idx=pd.DatetimeIndex([d+pd.Timedelta(minutes=570+5*i) for d in days for i in range(78)]).tz_localize("America/New_York")
+        close=pd.DataFrame({t:100*np.exp(np.cumsum(np.random.normal(0,0.004,len(idx)))) for t in tickers},index=idx)
+        return pd.concat({"Close":close},axis=1)
     n=len(pd.bdate_range(start, pd.Timestamp.today())) if start is not None else 275
     idx=pd.bdate_range(end=pd.Timestamp.today(), periods=n)
     close=pd.DataFrame({t:series(n, random.uniform(-0.0003,0.0009)).values for t in tickers},index=idx)

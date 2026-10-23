@@ -39,6 +39,11 @@ use the shortcut. Tabs:
   and sells everything 5 minutes before the close. It knows the NYSE
   holidays and 1 pm early closes; the Home tab shows whether the market is
   open now and when it next opens.
+  **Replay result** (30 trading days, 2026-09-14 to 2026-10-23, no peeking
+  ahead): $10,000 became $9,553 (-4.5%). Holding the same top 5 all day with
+  no auto-sells: -3.7%. SPY over the same hours: -0.6%. The 2% stop-loss fired
+  27 times, the 3% take-profit only 6, so the auto-sells mostly locked in small
+  losses. Day trading these picks lost money in this test.
 - **Watchlist**, **History**, **Track record** (your past picks vs SPY),
   **Backtest** (the pick replayed over 10 past years) and **Settings** (SEC
   email, shortcut, light/dark colours, accent colour, text size, and an
@@ -56,6 +61,7 @@ py stock_tracker.py check MSFT               # extra checklist for one company
 py stock_tracker.py market                   # market weather
 py stock_tracker.py practice start MSFT KO --days 30 --take-profit 0.3
 py stock_tracker.py practice day             # trade today's top 5 until the close (market hours)
+py stock_tracker.py practice replay --days 30  # replay day trading on past 5-minute prices
 py stock_tracker.py practice                 # update and show practice tests
 py stock_tracker.py history MSFT             # returns, worst drop, chart, CSV
 py stock_tracker.py add MSFT --bought 410.50 --stop 0.15
