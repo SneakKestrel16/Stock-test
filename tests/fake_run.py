@@ -62,6 +62,13 @@ def fake_get(url, headers=None, timeout=None, **kw):
             f"<pubDate>Mon, 19 Oct 2026 1{i}:00:00 GMT</pubDate><source>Example News</source></item>"
             for i,t in enumerate(["Company beats forecasts","Fund LLC Shares Sold by X","New product"]))
         r.content=f"<rss><channel>{items}</channel></rss>".encode(); return r
+    if "wikipedia.org" in url:
+        assert "@" not in headers["User-Agent"]          # the SEC email goes only to sec.gov
+        if "api.php" in url:
+            return R({"query": {"pages": {"1": {"revisions": [{"revid": 7}]}}}})
+        r = R({}); rows = "".join(f"<tr><td>{t}</td><td>{789019 if t == 'MSFT' else 1000 + i}</td></tr>"
+                                  for i, t in enumerate(s.DEFAULT_TICKERS[:40]))
+        r.text = f"<table><tr><th>Symbol</th><th>CIK</th></tr>{rows}</table>"; return r
     assert "@" in headers["User-Agent"]
     if "company_tickers" in url:
         return R({str(i):{"cik_str":789019 if t=="MSFT" else 1000+i,"ticker":t,"title":t}

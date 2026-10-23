@@ -1263,10 +1263,14 @@ class App:
         ttk.Label(top, text="   Years back:").pack(side="left")
         self.bt_years = tk.StringVar(value="10")
         ttk.Spinbox(top, from_=3, to=15, textvariable=self.bt_years, width=4).pack(side="left")
+        ttk.Label(top, text="   Stocks:").pack(side="left")
+        self.bt_universe = tk.StringVar(value="S&P 500 as it was")
+        ttk.Combobox(top, textvariable=self.bt_universe, state="readonly", width=17,
+                     values=["S&P 500 as it was", "Today's list (faster)"]).pack(side="left")
         self.bt_csv_btn = ttk.Button(top, text="Save monthly CSV...", command=self.save_bt_csv,
                                      state="disabled")
         self.bt_csv_btn.pack(side="left", padx=6)
-        ttk.Label(top, text="First run downloads old SEC reports (a few minutes); later runs reuse them.",
+        ttk.Label(top, text="First S&P 500 run downloads ~700 companies' SEC reports (up to an hour); later runs reuse them.",
                   style="Muted.TLabel").pack(side="left")
 
         body = ttk.Frame(f)
@@ -1299,7 +1303,8 @@ class App:
         except ValueError:
             years = 10
         self.run_bg("Starting backtest...",
-                    lambda: st.backtest(years=years, contact=contact, progress=self.progress),
+                    lambda: st.backtest(years=years, contact=contact, progress=self.progress,
+                                        universe="sp500" if self.bt_universe.get().startswith("S&P") else "list"),
                     self.backtest_done)
 
     def backtest_done(self, result):

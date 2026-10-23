@@ -283,8 +283,9 @@ def screen(tickers, weights, min_mcap, progress=print_progress):
 
 
 BASKET_NOTE = """\
-Spread it out: the top 5 together, split evenly. In the 10-year backtest the
-top 5 grew more and fell less than the single top pick (see Backtest)."""
+Spread it out: the top 5 together, split evenly. Replayed on the S&P 500 as it
+was each month (2016-2026), the top 5 beat SPY while the top pick alone barely
+grew and once fell 52%. Don't buy just #1."""
 
 
 def basket(ranked, sectors=None, n=5, cap=None):
@@ -830,9 +831,10 @@ HORIZONS = [("1 mo", 21), ("3 mo", 63), ("6 mo", 126), ("1 yr", 252)]
 
 BACKTEST_CAVEATS = """\
 Read this before trusting the numbers:
-- Hindsight in the stock list: these are today's big, successful companies.
-  Choosing among known winners flatters every line, so compare the pick with
-  "all stocks, equal" (a random choice from the same list) more than with SPY.
+- Hindsight in the stock list: today's list holds today's big, successful
+  companies, and choosing among known winners flatters every line. The S&P 500
+  option (members as they were) removes most of this. Either way, compare the
+  pick with "all stocks, equal" (a random choice from the same list) too.
 - Simplified data: trailing P/E instead of forecasts, yearly sales and profit
   figures (up to ~15 months old), no EV/EBITDA, no trading costs or taxes.
 - Past results don't predict future results. A method can beat the market for
