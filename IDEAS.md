@@ -303,3 +303,28 @@ Day trading is worse than picking at random; swing beats most random baskets
 but "growth only" beat it. The swing rules were chosen on the 30 days before
 this window, so this window is fair for them. Next idea: put "growth only" (and
 the other strategies) on trial as challengers too, judged the same way.
+
+## Hourly replay, ~3 years (2026-10-24)
+
+Yahoo keeps hourly bars ~730 days back (gave 722 sessions, 2023-11-27 to
+2026-10-23). `replay_data(interval="1h")`: buy at 10:30, stops checked hourly,
+sell at 16:00. Rougher than 5-minute: on the shared last 60 days, current day
+rules gave $10,161 hourly vs $9,951 on 5-minute; swing $10,195 vs $11,045.
+
+$10,000 over all 722 days:
+
+| | Day (S&P funnel) | Swing (64 list) |
+|---|---|---|
+| Old rules | $11,619 | $15,439 |
+| Current rules | $11,414 | $15,439 |
+| On trial | $11,811 | $14,673 |
+| SPY held throughout | $16,729 | $16,729 |
+| Random baskets, median | $10,189 | $15,851 |
+| Current beat % of random | 84% | 36% |
+| Best other strategy | momentum only $14,325 | momentum only $18,609 |
+
+By half-year (7 of them): day trading lost to SPY in all 7; swing beat the
+random median in 2. Conclusion: no rule set here reliably beats holding SPY;
+the last 60 days flattered swing. Next ideas: let `self_improve` choose
+challengers on the 3-year hourly history (less overfitting than 60 days), and
+allow a strategy (e.g. momentum only) to be a challenger, judged the same way.

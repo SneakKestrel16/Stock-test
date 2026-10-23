@@ -1968,10 +1968,14 @@ ALT_STRATEGIES = ("value only", "quality only", "growth only", "momentum only",
                   "yesterday's winners", "yesterday's losers")
 
 
-def _complete(index):
-    """Sessions in a 5-minute index that have both the 09:30 and 15:50 bars."""
+BAR = {"5m": ("60d", 5, "15:50"), "1h": ("730d", 60, "15:30")}   # Yahoo's limit, minutes, last bar
+
+
+def _complete(index, interval="5m"):
+    """Sessions in an intraday index that have both the 09:30 bar and the day's last bar
+    (early-close days lack it and are skipped)."""
     stamp = index.strftime("%H:%M")
-    return [d for d in sorted(set(index.date)) if {"09:30", "15:50"} <= set(stamp[index.date == d])]
+    return [d for d in sorted(set(index.date)) if {"09:30", BAR[interval][2]} <= set(stamp[index.date == d])]
 
 
 def save_bars(contact=None, say=print):
@@ -2000,22 +2004,26 @@ def _stored_bars(d):
     return f
 
 
-def replay_data(contact, say=print, universe="list"):
+def replay_data(contact, say=print, universe="list", interval="5m"):
     """Everything a day-trade replay needs, loaded once: 5-minute bars (Yahoo's last ~60
     sessions plus every session saved by `save_bars`) and, per session, the ranking made
     from the day before's close (SEC figures filed by then), each stock's daily swing
     (14-day ATR as % of price), the pool it ranked, and the other strategies' orderings.
     universe "sp500": rank the S&P 500 as it stood that month and keep the top
-    FUNNEL_SIZE (the funnel); "list": DEFAULT_TICKERS."""
+    FUNNEL_SIZE (the funnel); "list": DEFAULT_TICKERS.
+    interval "1h": Yahoo's hourly bars, ~2 years back (stops are checked once an hour,
+    buys at 10:30, sells at 16:00); saved 5-minute sessions are not used."""
+    period, minutes, _ = BAR[interval]
     if not contact:
         raise ValueError("The replay ranks stocks with old SEC reports. Set your SEC contact "
                          "email first (Settings tab, or: setup --contact you@example.com).")
     weights = parse_weights(None)
-    say("Finding trading days in Yahoo's 5-minute data (it keeps 60 days) and saved ones...")
-    spy = yf.download([BENCH], period="60d", interval="5m", progress=False)["Close"]
+    say(f"Finding trading days in Yahoo's {interval} data (it keeps {period}) and saved ones...")
+    spy = yf.download([BENCH], period=period, interval=interval, progress=False)["Close"]
     spy.index = spy.index.tz_convert(NY)
-    yahoo = _complete(spy.index)
-    stored = sorted(pd.Timestamp(f.name[:10]).date() for f in BARS_DIR.glob("*.csv.gz")) if BARS_DIR.exists() else []
+    yahoo = _complete(spy.index, interval)
+    stored = (sorted(pd.Timestamp(f.name[:10]).date() for f in BARS_DIR.glob("*.csv.gz"))
+              if BARS_DIR.exists() and interval == "5m" else [])
     sessions = sorted(set(yahoo) | set(stored))
     if not sessions:
         raise ValueError("No complete trading days in Yahoo's 5-minute data.")
@@ -2064,21 +2072,23 @@ def replay_data(contact, say=print, universe="list"):
     missing = [d for d in sessions if d not in set(stored)]
     bars = None
     if missing:
-        say(f"Downloading 5-minute prices for {len(need)} stocks...")
-        bars = yf.download(need + [BENCH], period="60d", interval="5m", auto_adjust=False,
+        say(f"Downloading {interval} prices for {len(need)} stocks...")
+        bars = yf.download(need + [BENCH], period=period, interval=interval, auto_adjust=False,
                            progress=False, threads=True)["Close"]
         bars.index = bars.index.tz_convert(NY)
     for d in sessions:
         day_bars = _stored_bars(d) if d in set(stored) else bars[bars.index.date == d]
         # a bar stamped 09:30 closes at 09:35: its close is the 09:35 price, as in the live test
-        steps = [(f"{(t + pd.Timedelta(minutes=5)):%H:%M}", {k: float(v) for k, v in row.items() if pd.notna(v)})
+        steps = [(f"{(t + pd.Timedelta(minutes=minutes)):%H:%M}", {k: float(v) for k, v in row.items() if pd.notna(v)})
                  for t, row in day_bars.iterrows()]
-        days[d]["steps"] = [(w, pr) for w, pr in steps if "09:35" <= w <= "15:55"]
+        first = f"{(570 + minutes) // 60:02d}:{(570 + minutes) % 60:02d}"   # first bar's close (09:30 + bar)
+        last = "15:55" if interval == "5m" else "16:00"                      # 5m: sell 5 min before the close
+        days[d]["steps"] = [(w, pr) for w, pr in steps if first <= w <= last]
     return days
 
 
 def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=None, sessions=None,
-               universe="sp500", strategy="ours"):
+               universe="sp500", strategy="ours", interval="5m"):
     """Replay day-trade rules on 5-minute bars, with no peeking: each morning's ranking
     uses only the day before's close and SEC figures filed by then; during the day each
     decision sees only finished bars. Money carries over. `sessions` picks the days
@@ -2090,7 +2100,7 @@ def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=
     stocks from the same pool each morning, the rest in random order as the queue).
     Returns (days_df, trades_df, summary)."""
     r = {**DAY_RULES, **(rules or {})}
-    data = data or replay_data(contact, say, universe)
+    data = data or replay_data(contact, say, universe, interval)
     sessions = sessions or sorted(data)[-days:]
     test = {"cash": cash, "positions": {}, "trades": [], "stop_pct": r["stop"], "take_profit": r["tp"],
             "day": True, "trail": r["trail"], "refill": r["refill"]}
@@ -2114,7 +2124,7 @@ def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=
         spy_in = spy_out = top_in = end_prices = None
         stamped = n0
         for when, prices in day["steps"]:
-            if when == "09:35":
+            if when == day["steps"][0][0]:                     # first price of the day: buy
                 if not top or not all(t in prices for t in top):
                     break                                          # no clean open: sit out
                 want = [t for t in top if t not in test["positions"]]
@@ -2123,7 +2133,7 @@ def day_replay(days=30, cash=10000.0, rules=None, contact=None, say=print, data=
                 spy_in, top_in = prices.get(BENCH), {t: prices[t] for t in top}
             else:
                 _auto_sell(test, prices)
-            if when == "15:55":
+            if when == day["steps"][-1][0]:                    # last price of the day
                 if not r["overnight"]:
                     for t, pos in list(test["positions"].items()):
                         if t in prices:
@@ -2318,7 +2328,8 @@ def cmd_practice(a):
     if a.action == "replay":
         try:
             days_df, trades, summary = day_replay(a.days, a.cash, {**active_rules("day"), "stop": stop, "tp": tp},
-                                                  load_state().get("contact"), lambda m: print("  " + m, flush=True))
+                                                  load_state().get("contact"), lambda m: print("  " + m, flush=True),
+                                                  interval=a.interval)
         except ValueError as e:
             sys.exit(str(e))
         print("\n" + "\n".join(replay_lines(days_df, summary)))
@@ -2467,6 +2478,8 @@ def main():
     p.add_argument("--cash", type=float, default=10000.0, help="pretend starting cash (default 10000)")
     p.add_argument("--days", type=int, default=30, help="how long the test runs; replay: trading days back (default 30)")
     p.add_argument("--csv", help="replay: save every trade to this CSV file")
+    p.add_argument("--interval", choices=["5m", "1h"], default="5m",
+                   help="replay: 5-minute prices (60 days) or hourly (about 3 years, rougher)")
     p.add_argument("--stop", type=float, help="auto-sell this far below cost (default 0.15; day 0.02; swing 0.05 below the high)")
     p.add_argument("--take-profit", type=float, help="auto-sell this far above cost, e.g. 0.3 (day: none)")
     p.add_argument("--follow", action="store_true",
