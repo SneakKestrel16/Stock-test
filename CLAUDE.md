@@ -67,6 +67,15 @@ conversation where this project started.
   command runs offline. Cloud sandboxes usually can't reach Yahoo or sec.gov,
   so use this to test there. All commands passed with it.
 
+## State file safety (2026-10-22)
+
+`state.json` is shared by the app's threads. `save_state` writes a temp file and
+swaps it in under `STATE_LOCK`; wrap any load-modify-save in `with STATE_LOCK`.
+Before this, two threads saving together corrupted the file, and `load_state`
+silently returned an empty state, so the next save wiped the watchlist. Now a
+damaged file is recovered (junk after the JSON ignored) or kept as
+`state.damaged-*.json`. Regression test: `tests/regression.py`.
+
 ## Desktop app + desktop shortcut (done 2026-10-22)
 
 Built as planned below: `StockTracker.pyw`, `Start Stock Tracker.bat`,

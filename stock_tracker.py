@@ -34,6 +34,7 @@ only show you things that happened since the last time you checked.
 import argparse
 import json
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
@@ -97,16 +98,29 @@ RED_FLAG_ITEMS = {"1.03", "3.01", "4.02", "2.06", "4.01"}
 
 # ---------------------------------------------------------------- state ----
 
+STATE_LOCK = threading.RLock()     # the desktop app reads/writes state from several threads
+
+
 def load_state():
-    try:
-        return json.loads(STATE_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"contact": None, "watchlist": {}, "seen": {}}
+    with STATE_LOCK:
+        try:
+            text = STATE_FILE.read_text()
+        except FileNotFoundError:
+            return {"contact": None, "watchlist": {}, "seen": {}}
+        try:
+            return json.JSONDecoder().raw_decode(text.strip())[0]   # ignores junk after the data
+        except json.JSONDecodeError:
+            # Never silently start over: the next save would wipe the watchlist for good.
+            STATE_FILE.replace(STATE_FILE.with_name(f"state.damaged-{datetime.now():%Y%m%d-%H%M%S}.json"))
+            return {"contact": None, "watchlist": {}, "seen": {}}
 
 
 def save_state(st):
     HOME.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(st, indent=2, default=str))
+    tmp = STATE_FILE.with_suffix(".tmp")
+    with STATE_LOCK:
+        tmp.write_text(json.dumps(st, indent=2, default=str))
+        tmp.replace(STATE_FILE)        # swap in whole: never a half-written state.json
 
 
 def money(x):
@@ -211,6 +225,10 @@ def parse_weights(pairs):
         if k not in w:
             raise ValueError(f"Unknown factor '{k}'. Use: {', '.join(w)}")
         w[k] = float(v)
+        if w[k] < 0:
+            raise ValueError(f"Weight for '{k}' can't be negative.")
+    if not any(w.values()):        # check before downloading 64 companies, not after
+        raise ValueError("All weights are zero.")
     return w
 
 
@@ -261,13 +279,14 @@ def log_picks(ranked, top=5):
 
 
 def add_to_watchlist(t, bought=None, stop=0.15, keep_existing=False):
-    st = load_state()
     entry = {"added": str(date.today()), "bought": bought, "stop_pct": stop}
-    if keep_existing:
-        st["watchlist"].setdefault(t, entry)
-    else:
-        st["watchlist"][t] = entry
-    save_state(st)
+    with STATE_LOCK:
+        st = load_state()
+        if keep_existing:
+            st["watchlist"].setdefault(t, entry)
+        else:
+            st["watchlist"][t] = entry
+        save_state(st)
 
 
 def cmd_pick(a):
@@ -453,9 +472,11 @@ def analyst_events(tk, since):
         if d < since:
             continue
         action = words.get(str(r.get("Action", "")).lower(), r.get("Action", ""))
-        frm = f" from {r['FromGrade']}" if r.get("FromGrade") else ""
-        out.append({"id": f"analyst:{d}:{r.get('Firm')}:{r.get('ToGrade')}", "date": d,
-                    "kind": "Analyst", "text": f"{r.get('Firm')} {action}{frm} to {r.get('ToGrade')}",
+        frm, to = r.get("FromGrade"), r.get("ToGrade")
+        text = (f"{r.get('Firm')} kept its {to} rating" if frm == to
+                else f"{r.get('Firm')} {action}" + (f" from {frm}" if frm else "") + f" to {to}")
+        out.append({"id": f"analyst:{d}:{r.get('Firm')}:{to}", "date": d,
+                    "kind": "Analyst", "text": text,
                     "url": "", "flag": action == "DOWNGRADED"})
     return out
 
@@ -521,7 +542,7 @@ def sec_cik(ticker, headers):
 
 def sec_events(ticker, contact, since):
     if not contact:
-        return [], "SEC filings skipped (run: setup --contact you@example.com)"
+        return [], "SEC filings skipped: no SEC contact email set (Settings tab, or: setup --contact)"
     headers = {"User-Agent": f"stock_tracker personal research {contact}"}
     try:
         cik = sec_cik(ticker, headers)
@@ -599,7 +620,10 @@ def check_ticker(ticker, state, days=30, show_all=False):
     seen = set(state["seen"].get(t, []))
     new = events if show_all else [e for e in events if e["id"] not in seen]
     new.sort(key=lambda e: e["date"], reverse=True)
-    state["seen"][t] = sorted(seen | {e["id"] for e in events})[-500:]
+    # Cap the memory, but never forget what's still in the look-back window, or it
+    # would show up as "new" again. Older IDs can't reappear unless --days grows.
+    now = {e["id"] for e in events}
+    state["seen"][t] = sorted(now | set(sorted(seen - now)[:max(0, 500 - len(now))]))
     price = hist["Close"].iloc[-1] if hist is not None and not hist.empty else None
     return {"alerts": alerts, "events": new, "note": note, "price": price}
 

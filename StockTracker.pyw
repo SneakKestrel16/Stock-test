@@ -173,7 +173,8 @@ class App:
                     messagebox.showerror("Stock Tracker", str(a))
         except queue.Empty:
             pass
-        self.root.after(100, self.poll)
+        finally:    # an error in a callback must not stop polling, or every later result is lost
+            self.root.after(100, self.poll)
 
     # ------------------------------------------------------------- pick tab
     def build_pick(self, f):
@@ -488,11 +489,15 @@ class App:
     def watch_remove(self):
         sel = self.pos_tv.selection()
         if sel and messagebox.askyesno("Stock Tracker", f"Stop watching {sel[0]}?"):
-            s = st.load_state()
-            s["watchlist"].pop(sel[0], None)
-            s["seen"].pop(sel[0], None)
-            st.save_state(s)
+            with st.STATE_LOCK:
+                s = st.load_state()
+                s["watchlist"].pop(sel[0], None)
+                s["seen"].pop(sel[0], None)
+                st.save_state(s)
             self.refresh_watchlist()
+            for iid in self.ev_tv.get_children():
+                if self.ev_tv.item(iid, "values")[0] == sel[0]:
+                    self.ev_tv.delete(iid)
 
     def do_watch(self):
         try:
@@ -507,7 +512,11 @@ class App:
             for i, t in enumerate(state["watchlist"], 1):
                 self.progress(f"Checking {t} ({i}/{len(state['watchlist'])})...")
                 results[t] = st.check_ticker(t, state, days, show_all)
-            st.save_state(state)
+            # Re-read before saving: the watchlist or email may have changed meanwhile.
+            with st.STATE_LOCK:
+                fresh = st.load_state()
+                fresh["seen"].update({t: state["seen"][t] for t in results if t in fresh["watchlist"]})
+                st.save_state(fresh)
             return results, st.save_report(results) if results else None
 
         if not st.load_state()["watchlist"]:
@@ -713,9 +722,10 @@ class App:
         if email and "@" not in email:
             messagebox.showwarning("Stock Tracker", "That doesn't look like an email address.")
             return
-        s = st.load_state()
-        s["contact"] = email or None
-        st.save_state(s)
+        with st.STATE_LOCK:
+            s = st.load_state()
+            s["contact"] = email or None
+            st.save_state(s)
         self.status.set("Saved." if email else "Cleared. SEC filings will be skipped.")
 
     def make_shortcut(self):
